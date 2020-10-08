@@ -88,6 +88,7 @@ def add_doppler_compensation(input_data,
         exp_doppler_compensation = azimuth_mod_coefs[doppler_compensation_indices]
     else:
         exp_doppler_compensation = azimuth_mod_coefs
+        doppler_indices = np.arange(num_doppler_bins)
 
     # Add half bin rotation if Doppler index was odd
     if num_tx_antennas == 2:
@@ -100,11 +101,14 @@ def add_doppler_compensation(input_data,
     exp_doppler_compensation = np.expand_dims(exp_doppler_compensation, axis=1)
 
     # Rotate
-    azimuth_values = input_data[:, (num_antennas/num_tx_antennas):, :]
-    for azi_val in azimuth_values:
-        Re = exp_doppler_compensation.real * azi_val.imag - exp_doppler_compensation.imag * azi_val.real
-        Im = exp_doppler_compensation.imag * azi_val.imag + exp_doppler_compensation.real * azi_val.real
-        input_data[:, (num_antennas/num_tx_antennas):, :] = Re + 1j * Im
+    azimuth_values = input_data[:, int(np.ceil(num_antennas/num_tx_antennas)):, :]
+    # for azi_val in azimuth_values:
+    for i in range(azimuth_values.shape[1]):
+        azi_val = azimuth_values[:, i, :]
+        # Re = exp_doppler_compensation.real.T * azi_val.imag - exp_doppler_compensation.imag.T * azi_val.real
+        # Im = exp_doppler_compensation.imag.T * azi_val.imag + exp_doppler_compensation.real.T * azi_val.real
+        # input_data[:, int(np.ceil(num_antennas/num_tx_antennas))+i, :] = Re + 1j * Im
+        input_data[:, int(np.ceil(num_antennas / num_tx_antennas)) + i, :] = azi_val * exp_doppler_compensation.T
 
     return input_data
 
@@ -117,12 +121,19 @@ def rx_channel_phase_bias_compensation(rx_channel_compensations, input, num_ante
         input: complex number.
         num_antennas: number of symbols.
     """
-    azimuth_values = input[:num_antennas]
+    azimuth_values = input[:, :num_antennas, :]
     rx_channel_compensations_values = rx_channel_compensations[:num_antennas]
 
-    Re = rx_channel_compensations_values * (azimuth_values.imag - azimuth_values.real)
-    Im = rx_channel_compensations_values * (azimuth_values.imag + azimuth_values.real)
-    input[:num_antennas] = Re + 1j * Im
+    for rx_virt_ch in range(azimuth_values.shape[1]):
+        rx_virt_values = input[:, rx_virt_ch, :]
+        input[:, rx_virt_ch, :].real = rx_channel_compensations_values[rx_virt_ch].real * rx_virt_values.real - \
+                                       rx_channel_compensations_values[rx_virt_ch].imag * rx_virt_values.imag
+        input[:, rx_virt_ch, :].imag = rx_channel_compensations_values[rx_virt_ch].imag * rx_virt_values.real + \
+                                       rx_channel_compensations_values[rx_virt_ch].real * rx_virt_values.imag
+
+    # Re = rx_channel_compensations_values * (azimuth_values.imag - azimuth_values.real)
+    # Im = rx_channel_compensations_values * (azimuth_values.imag + azimuth_values.real)
+    # input[:num_antennas] = Re + 1j * Im
 
     return
 

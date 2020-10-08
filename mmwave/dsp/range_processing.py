@@ -36,7 +36,7 @@ def range_resolution(num_adc_samples, dig_out_sample_rate=2500, freq_slope_const
     return range_resolution, band_width
 
 
-def range_processing(adc_data, window_type_1d=None, axis=-1):
+def range_processing(adc_data, window_type_1d=None, axis=-1, num_range_bins=256):
     """Perform 1D FFT on complex-format ADC data.
 
     Perform optional windowing and 1D FFT on the ADC data.
@@ -59,7 +59,7 @@ def range_processing(adc_data, window_type_1d=None, axis=-1):
         fft1d_in = adc_data
 
     # Note: np.fft.fft is a 1D operation, using higher dimension input defaults to slicing last axis for transformation
-    radar_cube = np.fft.fft(fft1d_in, axis=axis)
+    radar_cube = np.fft.fft(fft1d_in, axis=axis, n=num_range_bins)
 
     return radar_cube
 

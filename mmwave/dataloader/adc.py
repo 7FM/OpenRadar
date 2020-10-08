@@ -14,8 +14,9 @@ import codecs
 import socket
 import struct
 from enum import Enum
-
+import threading
 import numpy as np
+from multiprocessing import Process, Queue
 
 
 class CMD(Enum):
@@ -42,24 +43,151 @@ class CMD(Enum):
 CONFIG_HEADER = '5aa5'
 CONFIG_STATUS = '0000'
 CONFIG_FOOTER = 'aaee'
-ADC_PARAMS = {'chirps': 128,  # 32
-              'rx': 4,
-              'tx': 3,
-              'samples': 128,
-              'IQ': 2,
-              'bytes': 2}
 # STATIC
-MAX_PACKET_SIZE = 4096
+MAX_PACKET_SIZE = 1514
 BYTES_IN_PACKET = 1456
-# DYNAMIC
-BYTES_IN_FRAME = (ADC_PARAMS['chirps'] * ADC_PARAMS['rx'] * ADC_PARAMS['tx'] *
-                  ADC_PARAMS['IQ'] * ADC_PARAMS['samples'] * ADC_PARAMS['bytes'])
-BYTES_IN_FRAME_CLIPPED = (BYTES_IN_FRAME // BYTES_IN_PACKET) * BYTES_IN_PACKET
-PACKETS_IN_FRAME = BYTES_IN_FRAME / BYTES_IN_PACKET
-PACKETS_IN_FRAME_CLIPPED = BYTES_IN_FRAME // BYTES_IN_PACKET
-UINT16_IN_PACKET = BYTES_IN_PACKET // 2
-UINT16_IN_FRAME = BYTES_IN_FRAME // 2
+# BYTES_IN_PACKET = 1462
 
+
+class AdcDataStreamer():
+    def __init__(self, data_recv_cfg, bytes_in_frame, timeout=1, udp_raw_data_dir=None):
+        self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        # Bind data socket to fpga
+        print("DCA IP:", data_recv_cfg)
+        self.data_socket.bind(data_recv_cfg)
+        self.timeout = timeout
+        self.bytes_in_frame = bytes_in_frame
+        # print("bytes in frame:", bytes_in_frame)
+        self.uint16_in_frame = bytes_in_frame // 2
+        self.uint16_in_packet = BYTES_IN_PACKET // 2
+        self.startup = True
+        self.running = True
+        self.frame_byte_idx = 0
+        self.backup_file = open(udp_raw_data_dir, "wb+")
+        # self.ret_frame = np.zeros(self.uint16_in_frame, dtype=np.int16)
+        # self.ret_frame = np.zeros(self.bytes_in_frame, dtype=bytes)
+        # self.ret_frame = bytearray(self.bytes_in_frame)
+        self.ret_frame = np.zeros(self.bytes_in_frame, dtype=np.uint8)
+        self.last_byte_count = 0
+        self.last_packet_num = 0
+        self.lost_packages = 0
+
+    def is_set_up(self):
+        try:
+            self.data_socket.settimeout(1)
+            packet_num, byte_count, packet_data = self._read_data_packet()
+            return True
+        except socket.timeout as e:
+            return False
+
+    def stream(self, data_queue):
+
+        # while self.running:
+        #     self.data_socket.settimeout(2)
+        #     all_data = []
+        #     print("Start")
+        #     while True:
+        #         try:
+        #             p_num, b_count, data = self._read_data_packet()
+        #             print(data)
+        #             all_data.extend(data)
+        #         except Exception as e:
+        #             print(e)
+        #             data_queue.put(all_data)
+        #             self.running = False
+        #             return all_data
+
+        ret_frame = np.zeros(self.bytes_in_frame, dtype=np.uint8)
+
+        while self.running:
+
+            while self.startup:
+                self.data_socket.settimeout(self.timeout)
+                # Wait for start of next frame
+                # if self.startup:
+                try:
+                    packet_num, byte_count, packet_data = self._read_data_packet()
+                    # print("First byte c", byte_count)
+                    # print("len packets", len(packet_data))
+                except Exception as e:
+                    print(e)
+                    raise TimeoutError("Could not reveive from dca1000 using timeout", self.timeout)  # TODO remove when timeout handled?
+                self.last_byte_count = byte_count
+                self.last_packet_num = packet_num
+                if byte_count % self.bytes_in_frame < BYTES_IN_PACKET:  # got first bytes of new frame
+                    # print(byte_count, packet_num, byte_count / packet_num)
+                    # self.frame_byte_idx = (byte_count % self.bytes_in_frame) // 2 or BYTES_IN_PACKET // 2  # old
+                    self.frame_byte_idx = (byte_count % self.bytes_in_frame) or len(packet_data)
+                    # print(self.frame_byte_idx, self.bytes_in_frame, (byte_count % self.bytes_in_frame))
+                    # if self.frame_byte_idx > len(packet_data):
+                    #     self.frame_byte_idx = len(packet_data)
+                    # print("FrameByteIdx 1", self.frame_byte_idx)
+                    # print("Range: ", 0, " ", self.frame_byte_idx)
+                    # self.ret_frame[0:self.frame_byte_idx] = packet_data[-self.frame_byte_idx:]
+                    ret_frame[0:self.frame_byte_idx] = packet_data[len(packet_data) - self.frame_byte_idx:]
+                    # print(packet_data[len(packet_data) - self.frame_byte_idx:20])
+                    self.startup = False
+                    # break
+
+            self.data_socket.settimeout(self.timeout)
+
+            packet_num, byte_count, packet_data = self._read_data_packet()
+            # new_byte_count = byte_count - self.last_byte_count
+            # new_byte_idx = new_byte_count // 2
+            new_byte_idx = len(packet_data)
+            # print(new_byte_idx)
+
+            if self.last_packet_num + 1 == packet_num:  # check if packets are being dropped
+                # if self.frame_byte_idx + new_byte_idx >= self.uint16_in_frame:  # old
+                if self.frame_byte_idx + new_byte_idx >= self.bytes_in_frame:
+                    # overshoot_idx = self.frame_byte_idx + new_byte_idx - self.uint16_in_frame  # old
+                    # print("FrameByteIdx 2", self.frame_byte_idx)
+                    # print("Range: ", self.frame_byte_idx, " end")
+                    ret_frame[self.frame_byte_idx:] = \
+                        packet_data[:self.bytes_in_frame - self.frame_byte_idx]
+                        # packet_data[:self.uint16_in_frame - self.frame_byte_idx]  # old
+                    data_queue.put(ret_frame.tobytes())
+                    added_bytes = self.bytes_in_frame - self.frame_byte_idx
+                    self.frame_byte_idx = new_byte_idx - added_bytes
+                    # to_add = new_byte_idx - self.frame_byte_idx
+                    # overshoot_idx = self.frame_byte_idx + new_byte_idx - self.bytes_in_frame
+                    # self.frame_byte_idx = new_byte_idx - overshoot_idx  # new_byte_count - (self.bytes_in_frame // 2 - self.frame_byte_idx)
+                    # print("FrameByteIdx 3", self.frame_byte_idx)
+                    # print("Range: ", 0, " ", self.frame_byte_idx)
+                    if self.frame_byte_idx > 0:
+                        ret_frame[:self.frame_byte_idx] = packet_data[-self.frame_byte_idx:]
+                else:
+                    # print("FrameByteIdx 4", self.frame_byte_idx)
+                    # print("Range: ", self.frame_byte_idx, " ", self.frame_byte_idx + new_byte_idx)
+                    ret_frame[self.frame_byte_idx:self.frame_byte_idx + new_byte_idx] = packet_data
+                    self.frame_byte_idx += new_byte_idx
+            else:
+                self.lost_packages += 1
+                print("Lost pkgs:", self.lost_packages)
+                self.startup = True
+
+            self.last_byte_count = byte_count
+            self.last_packet_num = packet_num
+
+    def _read_data_packet(self):
+        """Helper function to read in a single ADC packet via UDP
+
+        Returns:
+            int: Current packet number, byte count of data that has already been read, raw ADC data in current packet
+
+        """
+        data, addr = self.data_socket.recvfrom(MAX_PACKET_SIZE)  # TODO handle timeouts?
+        packet_num = struct.unpack('<1l', data[:4])[0]
+        # print("packet_num", packet_num)
+        byte_count = struct.unpack('>Q', b'\x00\x00' + data[4:10][::-1])[0]
+        # packet_data = data[10:]
+        packet_data = np.frombuffer(data[10:], dtype=np.uint8)
+        # self.backup_file.write(data)
+        # packet_data = np.frombuffer(data[10:], dtype=np.int16)  # TODO
+        return packet_num, byte_count, packet_data
+
+    def close(self):
+        self.data_socket.close()
 
 class DCA1000:
     """Software interface to the DCA1000 EVM board via ethernet.
@@ -85,13 +213,28 @@ class DCA1000:
 
     """
 
-    def __init__(self, static_ip='192.168.33.30', adc_ip='192.168.33.180',
-                 data_port=4098, config_port=4096):
+    def __init__(self, static_ip='192.168.33.30', adc_ip='192.168.33.180', timeout=1, udp_raw_data_dir=None,
+                 data_port=4098, config_port=4096, num_loops_per_frame=16, num_rx=4, num_tx=3, num_adc_samples=240):
         # Save network data
         # self.static_ip = static_ip
         # self.adc_ip = adc_ip
         # self.data_port = data_port
         # self.config_port = config_port
+
+        adc_params = {'chirps': 16,  # 32 TODO chirps
+                      'rx': num_rx,
+                      'tx': num_tx,
+                      'samples': num_adc_samples,
+                      'IQ': 2,
+                      'bytes': 2}
+        # DYNAMIC
+        self.bytes_in_frame = (adc_params['chirps'] * adc_params['rx'] * adc_params['tx'] *
+                               adc_params['IQ'] * adc_params['samples'] * adc_params['bytes'])
+        self.bytes_in_frame_clipped = (self.bytes_in_frame // BYTES_IN_PACKET) * BYTES_IN_PACKET
+        self.packets_in_frame = self.bytes_in_frame / BYTES_IN_PACKET
+        self.packets_in_frame_clipped = self.bytes_in_frame // BYTES_IN_PACKET
+        self.uint16_in_packet = BYTES_IN_PACKET // 2
+        self.uint16_in_frame = self.bytes_in_frame // 2
 
         # Create configuration and data destinations
         self.cfg_dest = (adc_ip, config_port)
@@ -102,12 +245,15 @@ class DCA1000:
         self.config_socket = socket.socket(socket.AF_INET,
                                            socket.SOCK_DGRAM,
                                            socket.IPPROTO_UDP)
-        self.data_socket = socket.socket(socket.AF_INET,
-                                         socket.SOCK_DGRAM,
-                                         socket.IPPROTO_UDP)
+        # self.data_socket = socket.socket(socket.AF_INET,
+        #                                  socket.SOCK_DGRAM,
+        #                                  socket.IPPROTO_UDP)
 
         # Bind data socket to fpga
-        self.data_socket.bind(self.data_recv)
+        # self.data_socket.bind(self.data_recv)
+
+        self.adc_data_streamer = AdcDataStreamer(self.data_recv, self.bytes_in_frame, timeout=timeout, 
+                                                 udp_raw_data_dir=udp_raw_data_dir)
 
         # Bind config socket to fpga
         self.config_socket.bind(self.cfg_recv)
@@ -122,6 +268,16 @@ class DCA1000:
         self.last_frame = None
 
         self.lost_packets = None
+        self.producer = None
+        self.data_queue = None
+
+    def start_streaming(self, data_queue):
+        self.data_queue = data_queue
+        self.producer = Process(target=self.adc_data_streamer.stream, args=(data_queue,))
+        self.producer.start()
+
+    def read_adc(self):
+        return self.data_queue.get()
 
     def configure(self):
         """Initializes and connects to the FPGA
@@ -153,10 +309,10 @@ class DCA1000:
             None
 
         """
-        self.data_socket.close()
+        self.adc_data_streamer.data_socket.close()
         self.config_socket.close()
 
-    def read(self, timeout=1):
+    def read(self, timeout=30):
         """ Read in a single packet via UDP
 
         Args:
@@ -170,32 +326,48 @@ class DCA1000:
         self.data_socket.settimeout(timeout)
 
         # Frame buffer
-        ret_frame = np.zeros(UINT16_IN_FRAME, dtype=np.uint16)
+        # ret_frame = np.zeros(UINT16_IN_FRAME, dtype=np.uint16)
+        ret_frame = np.zeros(self.uint16_in_frame, dtype=np.int16)
 
+        frame_byte_idx = 0
+
+        packets_read = 1
         # Wait for start of next frame
+        before = 0
         while True:
             packet_num, byte_count, packet_data = self._read_data_packet()
-            if byte_count % BYTES_IN_FRAME_CLIPPED == 0:
-                packets_read = 1
-                ret_frame[0:UINT16_IN_PACKET] = packet_data
+            # print(BYTES_IN_FRAME_CLIPPED, " : ", byte_count, " ; ", byte_count % BYTES_IN_FRAME_CLIPPED,
+            #       " ... ", byte_count - before)
+            # before = byte_count
+            # if byte_count % self.bytes_in_frame_clipped == 0:
+            # if byte_count % self.bytes_in_frame < BYTES_IN_PACKET:
+            if byte_count % self.bytes_in_frame < 1514:
+                # frame_byte_idx = byte_count % self.bytes_in_frame
+                frame_byte_idx = byte_count % 1500
+                ret_frame[0:frame_byte_idx] = packet_data[-frame_byte_idx:]
                 break
+            # if byte_count % BYTES_IN_FRAME == 0:
+            #     packets_read = 1
+            #     ret_frame[0:self.uint16_in_packet] = packet_data
+            #     break
 
         # Read in the rest of the frame            
         while True:
+            # print("Wait for rest of frame")
             packet_num, byte_count, packet_data = self._read_data_packet()
             packets_read += 1
 
-            if byte_count % BYTES_IN_FRAME_CLIPPED == 0:
-                self.lost_packets = PACKETS_IN_FRAME_CLIPPED - packets_read
+            if byte_count % self.bytes_in_frame_clipped == 0:
+                self.lost_packets = self.packets_in_frame_clipped - packets_read
                 return ret_frame
 
-            curr_idx = ((packet_num - 1) % PACKETS_IN_FRAME_CLIPPED)
+            curr_idx = ((packet_num - 1) % self.packets_in_frame_clipped)
             try:
-                ret_frame[curr_idx * UINT16_IN_PACKET:(curr_idx + 1) * UINT16_IN_PACKET] = packet_data
+                ret_frame[curr_idx * self.uint16_in_packet:(curr_idx + 1) * self.uint16_in_packet] = packet_data
             except:
                 pass
 
-            if packets_read > PACKETS_IN_FRAME_CLIPPED:
+            if packets_read > self.packets_in_frame_clipped:
                 packets_read = 0
 
     def _send_command(self, cmd, length='0000', body='', timeout=1):
@@ -234,7 +406,7 @@ class DCA1000:
         data, addr = self.data_socket.recvfrom(MAX_PACKET_SIZE)
         packet_num = struct.unpack('<1l', data[:4])[0]
         byte_count = struct.unpack('>Q', b'\x00\x00' + data[4:10][::-1])[0]
-        packet_data = np.frombuffer(data[10:], dtype=np.uint16)
+        packet_data = np.frombuffer(data[10:], dtype=np.int16)  # TODO
         return packet_num, byte_count, packet_data
 
     def _listen_for_error(self):
@@ -259,7 +431,7 @@ class DCA1000:
         return self._send_command(CMD.RECORD_STOP_CMD_CODE)
 
     @staticmethod
-    def organize(raw_frame, num_chirps, num_rx, num_samples):
+    def organize(raw_frame, num_chirps, num_rx, num_samples, stream=False):
         """Reorganizes raw ADC data into a full frame
 
         Args:
@@ -270,11 +442,41 @@ class DCA1000:
 
         Returns:
             ndarray: Reformatted frame of raw data of shape (num_chirps, num_rx, num_samples)
+            chirps are sorted as follows:
+                -e.g. one tx antenna at a time, 3 in total: [txA, txB, txC] == [tx0, tx2, tx1]
+                -e.g. multiple tx antenna at a time, 3 in total: [txA, txB, txC] == [[tx0, tx1], tx2, tx1],
+                    order as per chirp config order send to xwr1xxx
+                -N = num_tx * num_chirps
+                -chirps = [ chirp1_txA, chirp1_txB, chirp1_txC,
+                            chirp2_txA, chirp2_txB, chirp2_txC,
+                            chirpN_txA, chirpN_txB, chirpN_txC ]
+                -e.g 3 TX Antennas (num_tx == 3), 16 chirps per Frame:
+                    - Antennas and Chirps with 1 indexing (e.g tx1, tx2, tx3; Chirp1, Chirp2, ..., Chirp16):
+                        chirps[28] == Chirp10 & num_tx2 == (10 - 1) * num_tx + (2 - 1)
+                        chirps[X] == Chirp(X // 3 + 1) + num_tx(X mod 3 + 1)
+                    - Antennas and Chirps with 0 indexing (e.g tx0, tx1, tx2; Chirp0, Chirp1, ..., Chirp15):
+                        chirps[28] == Chirp9 & num_tx1 == 9 * num_tx + 1
+                        chirps[X] == Chirp(X // 3) + num_tx(X mod 3)
 
         """
         ret = np.zeros(len(raw_frame) // 2, dtype=complex)
-
-        # Separate IQ data
-        ret[0::2] = raw_frame[0::4] + 1j * raw_frame[2::4]
-        ret[1::2] = raw_frame[1::4] + 1j * raw_frame[3::4]
-        return ret.reshape((num_chirps, num_rx, num_samples))
+        # TODO reshape depending on antenna parameter etc
+        if stream:
+            # raw_frame = np.dstack((raw_frame[:92160//2], raw_frame[92160//2:])).flatten()
+            ret[0::4] = raw_frame[0::8] + 1j * raw_frame[4::8]
+            ret[1::4] = raw_frame[1::8] + 1j * raw_frame[5::8]
+            ret[2::4] = raw_frame[2::8] + 1j * raw_frame[6::8]
+            ret[3::4] = raw_frame[3::8] + 1j * raw_frame[7::8]
+            ret = ret.reshape((num_chirps, num_samples, num_rx))
+            ret = ret.transpose((0, 2, 1))
+        else:
+            # Separate IQ data
+            ret[0::4] = raw_frame[0::8] + 1j * raw_frame[4::8]
+            ret[1::4] = raw_frame[1::8] + 1j * raw_frame[5::8]
+            ret[2::4] = raw_frame[2::8] + 1j * raw_frame[6::8]
+            ret[3::4] = raw_frame[3::8] + 1j * raw_frame[7::8]
+            # ret[0::2] = raw_frame[0::4] + 1j * raw_frame[2::4]
+            # ret[1::2] = raw_frame[1::4] + 1j * raw_frame[3::4]
+            ret = ret.reshape((num_chirps, num_samples, num_rx))
+            ret = ret.transpose((0, 2, 1))
+        return ret

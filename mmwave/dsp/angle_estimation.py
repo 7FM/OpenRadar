@@ -16,6 +16,7 @@ from . import compensation
 from scipy.signal import find_peaks
 import warnings
 
+
 def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
     """Calculate the X/Y coordinates for all detected objects.
     
@@ -45,7 +46,16 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
     # 1. Filter 1D-FFT output along range direction and perform optional static clutter removal.
     # fft2d_azimuth_in: [numChirpsPerFrame, numRxAntennas, numDetObj]
     num_det_obj = det_obj_2d.shape[0]
+
     fft2d_azimuth_in = radar_cube[..., det_obj_2d[:, RANGEIDX].astype(np.uint32)]
+
+    # radar_cube = compensation.add_doppler_compensation(fft2d_azimuth_in, config.numTxAntennas,
+    #                                       num_doppler_bins=len(det_obj_2d[:, DOPPLERIDX]),
+    #                                       doppler_indices=det_obj_2d[:, DOPPLERIDX].astype(np.uint32))
+
+    fft2d_azimuth_in = np.delete(fft2d_azimuth_in, list(range(0, fft2d_azimuth_in.shape[0], 3)), axis=0)  # TODO: if 3 tx antennas?
+
+
 
     # Clutter Removal
     if config.clutterRemovalEnabled:
@@ -82,18 +92,22 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
     # 3. Doppler compensation.
     # Only the 2nd half of the 2D FFT output needs to be compensated. That is 
     # the reason for azimuth_in[:, numRxAntennas, :].
-    compensation.addDopplerCompensation(det_obj_2d[:, DOPPLERIDX],
-                                        compensation.azimuthModCoefs,
-                                        compensation.azimuthModCoefsHalfBin,
-                                        azimuth_in[:, config.numRxAntennas:],
-                                        config.numRxAntennas * (config.numTxAntennas - 1))
+    # compensation.add_doppler_compensation(det_obj_2d[:, DOPPLERIDX],  # TODO
+    #                                     compensation.azimuthModCoefs,
+    #                                     compensation.azimuthModCoefsHalfBin,
+    #                                     azimuth_in[:, config.numRxAntennas:],
+    #                                     config.numRxAntennas * (config.numTxAntennas - 1))
+    # compensation.add_doppler_compensation(det_obj_2d[:, DOPPLERIDX],
+    #                                       config.numTxAntennas,
+    #                                       azimuth_in[:, config.numRxAntennas:],
+    #                                       config.numRxAntennas * (config.numTxAntennas - 1))
 
     # If receiver channel biases are provided, activate the following function
     # to compensate for it.
-    if config.rxChannelComp is not None:
-        compensation.rxChanPhaseBiasCompensation(config.rxChannelComp,
-                                                 azimuth_in,
-                                                 config.numVirtualAntennas)
+    # if config.rxChannelComp is not None:
+    #     compensation.rx_channel_phase_bias_compensation(config.rxChannelComp,
+    #                                              azimuth_in,
+    #                                              config.numVirtualAntennas)
 
     # The near field correction is currently in exclusion with velocity 
     # disambiguation because of implementation complexities and also because it 
@@ -101,16 +115,16 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
 
     # Save a copy for flipped version of azimuth_in for velocity disambiguation.
     azimuth_in_copy = np.zeros_like(azimuth_in)
-    if config.extendedMaxVelocityEnabled and config.nearFieldCorrectionCfg.enabled:
-        assert False, "Extended maximum velocity and near field correction are not supported simultaneously."
+    # if config.extendedMaxVelocityEnabled and config.nearFieldCorrectionCfg.enabled:
+    #     assert False, "Extended maximum velocity and near field correction are not supported simultaneously."
 
     if config.extendedMaxVelocityEnabled:
         azimuth_in_copy[:, :config.numVirtualAntAzim] = azimuth_in[:, :config.numVirtualAntAzim]
 
     # Save a copy of RX antennas corresponding to Tx2 antenna.
-    if config.nearFieldCorrectionCfg.enabled:
-        idx_temp = ((det_obj_2d[:, RANGEIDX] >= config.nearFieldCorrectionCfg.startRangeIdx) &
-                    (det_obj_2d[:, RANGEIDX] <= config.nearFieldCorrectionCfg.endRangeIdx))
+    if config.nearFieldCorrectionCfg:
+        idx_temp = ((det_obj_2d[:, RANGEIDX] >= 0) &
+                    (det_obj_2d[:, RANGEIDX] <= 25))
         azimuth_in_copy[idx_temp, :config.numRxAntennas] = \
             azimuth_in_copy[idx_temp, config.numRxAntennas:config.numRxAntennas * 2]
         azimuth_in[idx_temp, config.numRxAntennas:config.numRxAntennas * 2] = 0
@@ -119,13 +133,20 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
     azimuth_out = np.fft.fft(azimuth_in)
 
     # 5.1. Optional near field correction.
-    if config.nearFieldCorrectionCfg.enabled:
+    if config.nearFieldCorrectionCfg:
         azimuth_out_copy = np.fft.fft(azimuth_in_copy)
-        compensation.nearFieldCorrection(det_obj_2d,
-                                         config.nearFieldCorrectionCfg.startRangeIdx,
-                                         config.nearFieldCorrectionCfg.endRangeIdx,
-                                         azimuth_in, azimuth_in_copy,
-                                         azimuth_out, azimuth_out_copy)
+        for idx, point in enumerate(det_obj_2d):
+            compensation.near_field_correction(idx,
+                                               det_obj_2d,
+                                               0,
+                                               25,
+                                               azimuth_in_copy, azimuth_out_copy, config.numRxAntennas, 0.0408)  # TODO Range res
+            # compensation.near_field_correction(idx,
+            #                                    det_obj_2d,
+            #                                    config.nearFieldCorrectionCfg.startRangeIdx,
+            #                                    config.nearFieldCorrectionCfg.endRangeIdx,
+            #                                    azimuth_in, azimuth_in_copy,
+            #                                    azimuth_out, azimuth_out_copy)
 
     # 5.2. Optional velocity disambiguation.
     if config.extendedMaxVelocityEnabled:
@@ -137,7 +158,7 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
 
     # 7. Azimuth, X/Y calculation and populate detObj2D. Convert doppler index to 
     det_obj2d_azimuth = compensation.XYestimation(azimuth_mag_sqr, config.numAngleBins, det_obj_2d)
-    det_obj2d_azimuth[:, DOPPLERIDX] = DOPPLER_IDX_TO_SIGNED(det_obj2d_azimuth[:, DOPPLERIDX], config.numDopplerBins)
+    # det_obj2d_azimuth[:, DOPPLERIDX] = DOPPLER_IDX_TO_SIGNED(det_obj2d_azimuth[:, DOPPLERIDX], config.numDopplerBins)
 
     return det_obj2d_azimuth
 
@@ -828,7 +849,7 @@ def aoa_est_bf_multi_peak(gamma, sidelobe_level, width_adjust_3d_b, input_snr, e
     return num_max, np.array(est_var)
 
 
-def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
+def range_azimuth_heatmap(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
     """ Estimate the phase introduced from the elevation of the elevation antennas
 
     Args:
@@ -852,12 +873,78 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
     azimuth_ant_padded[:2 * num_rx, :] = azimuth_ant
 
     # Process azimuth information
+    azimuth_fft = np.absolute(np.fft.fft(azimuth_ant_padded, axis=0))
+    azimuth_fft = np.sqrt(azimuth_fft)
+    # azimuth_fft = np.log10(azimuth_fft + 1) * 10
+    return np.vstack((azimuth_fft[64//2:], azimuth_fft[:64//2]))  # swap rows
+    # k_max = azimuth_fft
+    # 
+    # k_max[k_max > (fft_size // 2) - 1] = k_max[k_max > (fft_size // 2) - 1] - fft_size
+    # wx = 2 * np.pi / fft_size * k_max  # shape = (num_detected_obj, )
+    # x_vector = wx / np.pi
+    # y_vector = np.sqrt(1 - x_vector ** 2)
+    # return x_vector, y_vector, 0
+
+
+def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64, extend_max_vel=True, multi_obj_beamforming=0.5, 
+              range_idx=None):
+    """ Estimate the phase introduced from the elevation of the elevation antennas
+
+    Args:
+        virtual_ant: Signal received by the rx antennas, shape = [#angleBins, #detectedObjs], zero-pad #virtualAnts to #angleBins
+        num_tx: Number of transmitter antennas used
+        num_rx: Number of receiver antennas used
+        fft_size: Size of the fft performed on the signals
+        extend_max_vel (bool): Perform additional max. velocity disambig. including another fft
+        multi_obj_beamforming (float): Peak value to multiply to add another detections for one range bin
+        range_idx (ndarray): range indices used for multi_obj_beamforming to append to detected points
+
+    Returns:
+        x_vector (float): Estimated x axis coordinate in meters (m)
+        y_vector (float): Estimated y axis coordinate in meters (m)
+        z_vector (float): Estimated z axis coordinate in meters (m)
+
+    """
+    assert num_tx > 2, "need a config for more than 2 TXs"
+    num_detected_obj = virtual_ant.shape[1]
+
+    # Zero pad azimuth
+    azimuth_ant = virtual_ant[:2 * num_rx, :]
+    azimuth_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex_)
+    azimuth_ant_padded[:2 * num_rx, :] = azimuth_ant
+
+    # Process azimuth information
     azimuth_fft = np.fft.fft(azimuth_ant_padded, axis=0)
-    k_max = np.argmax(np.abs(azimuth_fft), axis=0)  # shape = (num_detected_obj, )
+
+    # velocity disambig.
+    if extend_max_vel:
+        azimuth_ant_corrected = np.copy(azimuth_ant)
+        azimuth_ant_corrected[num_rx:] = np.negative(azimuth_ant_corrected[num_rx:])
+        azimuth_ant_padded_corrected = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex_)
+        azimuth_ant_padded_corrected[:2 * num_rx, :] = azimuth_ant_corrected
+        azimuth_fft_corrected = np.fft.fft(azimuth_ant_padded_corrected, axis=0)
+
+        # max values:  # TODO multiobjbeamforming
+        k_max_peaks = np.max(np.abs(azimuth_fft), axis=0)
+        k_max_peaks_corrected = np.max(np.abs(azimuth_fft_corrected), axis=0)
+        k_max_mask = (k_max_peaks > k_max_peaks_corrected)
+
+        #max indices:
+        k_max_normal = np.argmax(np.abs(azimuth_fft), axis=0)  # shape = (num_detected_obj, )
+        k_max_corrected = np.argmax(np.abs(azimuth_fft_corrected), axis=0)
+        k_max = k_max_mask * k_max_normal + np.logical_not(k_max_mask) * k_max_corrected
+    else:
+        k_max = np.argmax(np.abs(azimuth_fft), axis=0)
+
     # peak_1 = azimuth_fft[k_max]
     peak_1 = np.zeros_like(k_max, dtype=np.complex_)
     for i in range(len(k_max)):
         peak_1[i] = azimuth_fft[k_max[i], i]
+
+    # MultiObjBeamforming:
+    peaks = np.zeros(len(k_max), dtype=np.object)
+    for i in range(len(k_max)):
+        peaks[i] = find_peaks(azimuth_fft[i, :], height=multi_obj_beamforming * np.max(azimuth_fft[i, :]))
 
     k_max[k_max > (fft_size // 2) - 1] = k_max[k_max > (fft_size // 2) - 1] - fft_size
     wx = 2 * np.pi / fft_size * k_max  # shape = (num_detected_obj, )
@@ -879,7 +966,7 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
 
     # Calculate elevation phase shift
     wz = np.angle(peak_1 * peak_2.conj() * np.exp(1j * 2 * wx))
-    z_vector = wz / np.pi
+    z_vector = wz / np.pi * 0
     y_vector = np.sqrt(1 - x_vector ** 2 - z_vector ** 2)
     return x_vector, y_vector, z_vector
 

@@ -850,7 +850,7 @@ def aoa_est_bf_multi_peak(gamma, sidelobe_level, width_adjust_3d_b, input_snr, e
 
 
 def range_azimuth_heatmap(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
-    """ Estimate the phase introduced from the elevation of the elevation antennas
+    """ Create range azimuth 2d heatmap
 
     Args:
         virtual_ant: Signal received by the rx antennas, shape = [#angleBins, #detectedObjs], zero-pad #virtualAnts to #angleBins
@@ -873,10 +873,24 @@ def range_azimuth_heatmap(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
     azimuth_ant_padded[:2 * num_rx, :] = azimuth_ant
 
     # Process azimuth information
-    azimuth_fft = np.absolute(np.fft.fft(azimuth_ant_padded, axis=0))
-    azimuth_fft = np.sqrt(azimuth_fft)
+    azimuth_fft = np.absolute(np.fft.fft(azimuth_ant_padded, axis=0, norm="ortho"))
+    # azimuth_fft = azimuth_fft * 512
+    # azimuth_fft = np.sqrt(azimuth_fft)
     # azimuth_fft = np.log10(azimuth_fft + 1) * 10
-    return np.vstack((azimuth_fft[64//2:], azimuth_fft[:64//2]))  # swap rows
+    # azimuth_fft = np.log2(azimuth_fft) * 512
+    # azimuth_fft.resize(63, 256)
+    # azimuth_fft = azimuth_fft[1:-1,:]
+    # azimuth_fft_old = np.copy(azimuth_fft)
+    # azimuth_fft = np.vstack((azimuth_fft[64//2:], azimuth_fft[:64//2-1])) * 4  # swap rows
+    # azimuth_fft = np.log10(azimuth_fft + 1) * 10
+    azimuth_fft = np.vstack((azimuth_fft[64//2:], azimuth_fft[:64//2-1])) * 4
+    # print(np.max(azimuth_fft), "; ", np.min(azimuth_fft))
+
+    # import matplotlib
+    # matplotlib.use('tkagg')
+    # import matplotlib.pyplot as plt
+
+    return azimuth_fft
     # k_max = azimuth_fft
     # 
     # k_max[k_max > (fft_size // 2) - 1] = k_max[k_max > (fft_size // 2) - 1] - fft_size
@@ -886,8 +900,8 @@ def range_azimuth_heatmap(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
     # return x_vector, y_vector, 0
 
 
-def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64, extend_max_vel=True, multi_obj_beamforming=0.5, 
-              range_idx=None):
+def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=128, extend_max_vel=True, multi_obj_beamforming=None,
+              det_objs=None):
     """ Estimate the phase introduced from the elevation of the elevation antennas
 
     Args:
@@ -897,7 +911,7 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64, extend_max_vel=True,
         fft_size: Size of the fft performed on the signals
         extend_max_vel (bool): Perform additional max. velocity disambig. including another fft
         multi_obj_beamforming (float): Peak value to multiply to add another detections for one range bin
-        range_idx (ndarray): range indices used for multi_obj_beamforming to append to detected points
+        det_objs (ndarray): det_objs
 
     Returns:
         x_vector (float): Estimated x axis coordinate in meters (m)
@@ -916,6 +930,7 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64, extend_max_vel=True,
     # Process azimuth information
     azimuth_fft = np.fft.fft(azimuth_ant_padded, axis=0)
 
+    # k_max_mask = np.ones(num_detected_obj, dtype=np.bool)
     # velocity disambig.
     if extend_max_vel:
         azimuth_ant_corrected = np.copy(azimuth_ant)
@@ -942,9 +957,33 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64, extend_max_vel=True,
         peak_1[i] = azimuth_fft[k_max[i], i]
 
     # MultiObjBeamforming:
-    peaks = np.zeros(len(k_max), dtype=np.object)
-    for i in range(len(k_max)):
-        peaks[i] = find_peaks(azimuth_fft[i, :], height=multi_obj_beamforming * np.max(azimuth_fft[i, :]))
+    if multi_obj_beamforming is not None:
+        peaks = np.zeros(len(k_max), dtype=np.object)
+        if extend_max_vel:
+            corrected_fft = k_max_mask * np.abs(azimuth_fft) + np.logical_not(k_max_mask) * np.abs(azimuth_fft_corrected)
+        else: 
+            corrected_fft = np.abs(azimuth_fft)
+        for i in range(len(k_max)):
+            # peaks[i] = find_peaks(corrected_fft[:, i], height=multi_obj_beamforming * corrected_fft[k_max[i], i])[0]
+            for new_peak in find_peaks(corrected_fft[:, i], height=multi_obj_beamforming * corrected_fft[k_max[i], i])[0]:
+                if new_peak != k_max[i]:
+                    virtual_ant = np.c_[virtual_ant, virtual_ant[:, i]]
+                    det_objs = np.r_[det_objs, det_objs[i]]
+                    k_max = np.r_[k_max, new_peak]
+                    peak_1 = np.r_[peak_1, azimuth_fft[new_peak, i]]
+                    num_detected_obj += 1
+        # new_peaks = len(np.hstack(peaks.flatten()))
+        # virtual_ant_new = np.resize(virtual_ant, (virtual_ant.shape[0], new_peaks))
+        # range_idx_new = np.resize(range_idx, new_peaks)
+        # k_max_new = np.resize(k_max, new_peaks)
+        # for i, new_peak_list in enumerate(peaks):
+        #     for new_peak in new_peak_list:
+        #         if new_peak != k_max[i]:
+        #             range_idx_new[i] = range_idx[i]
+        #             virtual_ant[:, i] = virtual_ant[:, i]
+        #             k_max[]
+                
+
 
     k_max[k_max > (fft_size // 2) - 1] = k_max[k_max > (fft_size // 2) - 1] - fft_size
     wx = 2 * np.pi / fft_size * k_max  # shape = (num_detected_obj, )
@@ -968,7 +1007,7 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64, extend_max_vel=True,
     wz = np.angle(peak_1 * peak_2.conj() * np.exp(1j * 2 * wx))
     z_vector = wz / np.pi * 0
     y_vector = np.sqrt(1 - x_vector ** 2 - z_vector ** 2)
-    return x_vector, y_vector, z_vector
+    return x_vector, y_vector, z_vector, det_objs
 
 
 def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, method='Capon', num_vrx=12, est_range=90,

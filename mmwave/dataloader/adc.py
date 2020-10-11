@@ -16,6 +16,7 @@ import struct
 from enum import Enum
 import threading
 import numpy as np
+import time
 from multiprocessing import Process, Queue
 
 
@@ -50,7 +51,8 @@ BYTES_IN_PACKET = 1456
 
 
 class AdcDataStreamer():
-    def __init__(self, data_recv_cfg, bytes_in_frame, timeout=1, udp_raw_data_dir=None):
+    def __init__(self, data_recv_cfg, bytes_in_frame, timeout=1, udp_raw_data=False, udp_raw_data_dir=None,
+                 log_error_func=print, log_warning_func=print, log_info_func=print):
         self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         # Bind data socket to fpga
         print("DCA IP:", data_recv_cfg)
@@ -63,14 +65,18 @@ class AdcDataStreamer():
         self.startup = True
         self.running = True
         self.frame_byte_idx = 0
-        self.backup_file = open(udp_raw_data_dir, "wb+")
+        self.backup_file = open(udp_raw_data_dir, "wb+") if udp_raw_data else None
         # self.ret_frame = np.zeros(self.uint16_in_frame, dtype=np.int16)
         # self.ret_frame = np.zeros(self.bytes_in_frame, dtype=bytes)
         # self.ret_frame = bytearray(self.bytes_in_frame)
         self.ret_frame = np.zeros(self.bytes_in_frame, dtype=np.uint8)
         self.last_byte_count = 0
         self.last_packet_num = 0
+        self.last_frame_byte_idx = 0
         self.lost_packages = 0
+        self.log_error_func = log_error_func
+        self.log_warning_func = log_warning_func
+        self.log_info_func = log_info_func
 
     def is_set_up(self):
         try:
@@ -80,7 +86,7 @@ class AdcDataStreamer():
         except socket.timeout as e:
             return False
 
-    def stream(self, data_queue):
+    def stream(self, data_queue, time_queue):
 
         # while self.running:
         #     self.data_socket.settimeout(2)
@@ -98,27 +104,22 @@ class AdcDataStreamer():
         #             return all_data
 
         ret_frame = np.zeros(self.bytes_in_frame, dtype=np.uint8)
-
+        time_read = time.time()
+        
         while self.running:
 
-            while self.startup:
+            while self.startup:  # Wait for start of next frame
                 self.data_socket.settimeout(self.timeout)
-                # Wait for start of next frame
-                # if self.startup:
                 try:
                     packet_num, byte_count, packet_data = self._read_data_packet()
-                    # print("First byte c", byte_count)
-                    # print("len packets", len(packet_data))
                 except Exception as e:
-                    print(e)
-                    raise TimeoutError("Could not reveive from dca1000 using timeout", self.timeout)  # TODO remove when timeout handled?
+                    self.log_error_func(e)
+                    # raise TimeoutError("Could not reveive from dca1000 using timeout (s):", self.timeout)  # TODO remove when timeout handled?
                 self.last_byte_count = byte_count
                 self.last_packet_num = packet_num
-                if byte_count % self.bytes_in_frame < BYTES_IN_PACKET:  # got first bytes of new frame
-                    # print(byte_count, packet_num, byte_count / packet_num)
+                if (byte_count + BYTES_IN_PACKET) % self.bytes_in_frame < BYTES_IN_PACKET:  # got first bytes of new frame
                     # self.frame_byte_idx = (byte_count % self.bytes_in_frame) // 2 or BYTES_IN_PACKET // 2  # old
-                    self.frame_byte_idx = (byte_count % self.bytes_in_frame) or len(packet_data)
-                    # print(self.frame_byte_idx, self.bytes_in_frame, (byte_count % self.bytes_in_frame))
+                    self.frame_byte_idx = ((byte_count + BYTES_IN_PACKET) % self.bytes_in_frame) or len(packet_data)
                     # if self.frame_byte_idx > len(packet_data):
                     #     self.frame_byte_idx = len(packet_data)
                     # print("FrameByteIdx 1", self.frame_byte_idx)
@@ -132,6 +133,7 @@ class AdcDataStreamer():
             self.data_socket.settimeout(self.timeout)
 
             packet_num, byte_count, packet_data = self._read_data_packet()
+            # print(packet_num, byte_count, len(packet_data))
             # new_byte_count = byte_count - self.last_byte_count
             # new_byte_idx = new_byte_count // 2
             new_byte_idx = len(packet_data)
@@ -139,7 +141,8 @@ class AdcDataStreamer():
 
             if self.last_packet_num + 1 == packet_num:  # check if packets are being dropped
                 # if self.frame_byte_idx + new_byte_idx >= self.uint16_in_frame:  # old
-                if self.frame_byte_idx + new_byte_idx >= self.bytes_in_frame:
+                # print(self.frame_byte_idx + new_byte_idx, self.bytes_in_frame)
+                if self.frame_byte_idx + new_byte_idx >= self.bytes_in_frame:  # got a whole frame, put it in queue
                     # overshoot_idx = self.frame_byte_idx + new_byte_idx - self.uint16_in_frame  # old
                     # print("FrameByteIdx 2", self.frame_byte_idx)
                     # print("Range: ", self.frame_byte_idx, " end")
@@ -147,6 +150,7 @@ class AdcDataStreamer():
                         packet_data[:self.bytes_in_frame - self.frame_byte_idx]
                         # packet_data[:self.uint16_in_frame - self.frame_byte_idx]  # old
                     data_queue.put(ret_frame.tobytes())
+                    time_queue.put(time_read)
                     added_bytes = self.bytes_in_frame - self.frame_byte_idx
                     self.frame_byte_idx = new_byte_idx - added_bytes
                     # to_add = new_byte_idx - self.frame_byte_idx
@@ -156,6 +160,9 @@ class AdcDataStreamer():
                     # print("Range: ", 0, " ", self.frame_byte_idx)
                     if self.frame_byte_idx > 0:
                         ret_frame[:self.frame_byte_idx] = packet_data[-self.frame_byte_idx:]
+                    # else:
+                    #     self.frame_byte_idx = BYTES_IN_PACKET
+                    time_read = time.time()
                 else:
                     # print("FrameByteIdx 4", self.frame_byte_idx)
                     # print("Range: ", self.frame_byte_idx, " ", self.frame_byte_idx + new_byte_idx)
@@ -163,11 +170,12 @@ class AdcDataStreamer():
                     self.frame_byte_idx += new_byte_idx
             else:
                 self.lost_packages += 1
-                print("Lost pkgs:", self.lost_packages)
+                self.log_warning_func("Lost package count: {}".format(self.lost_packages))
                 self.startup = True
 
             self.last_byte_count = byte_count
             self.last_packet_num = packet_num
+            self.last_frame_byte_idx= self.frame_byte_idx
 
     def _read_data_packet(self):
         """Helper function to read in a single ADC packet via UDP
@@ -182,8 +190,9 @@ class AdcDataStreamer():
         byte_count = struct.unpack('>Q', b'\x00\x00' + data[4:10][::-1])[0]
         # packet_data = data[10:]
         packet_data = np.frombuffer(data[10:], dtype=np.uint8)
-        # self.backup_file.write(data)
-        # packet_data = np.frombuffer(data[10:], dtype=np.int16)  # TODO
+        if self.backup_file is not None:  # backup raw UDP traffic
+            self.backup_file.write(data)
+        # packet_data = np.frombuffer(data[10:], dtype=np.int16)
         return packet_num, byte_count, packet_data
 
     def close(self):
@@ -213,8 +222,10 @@ class DCA1000:
 
     """
 
-    def __init__(self, static_ip='192.168.33.30', adc_ip='192.168.33.180', timeout=1, udp_raw_data_dir=None,
-                 data_port=4098, config_port=4096, num_loops_per_frame=16, num_rx=4, num_tx=3, num_adc_samples=240):
+    def __init__(self, static_ip='192.168.33.30', adc_ip='192.168.33.180', timeout=1,
+                 data_port=4098, config_port=4096, num_loops_per_frame=16, num_rx=4, num_tx=3, num_adc_samples=240,
+                 udp_raw_data=0, udp_raw_data_dir=None,
+                 log_error_func=print, log_warning_func=print, log_info_func=print):
         # Save network data
         # self.static_ip = static_ip
         # self.adc_ip = adc_ip
@@ -253,7 +264,9 @@ class DCA1000:
         # self.data_socket.bind(self.data_recv)
 
         self.adc_data_streamer = AdcDataStreamer(self.data_recv, self.bytes_in_frame, timeout=timeout, 
-                                                 udp_raw_data_dir=udp_raw_data_dir)
+                                                 udp_raw_data=udp_raw_data, udp_raw_data_dir=udp_raw_data_dir,
+                                                 log_error_func=log_error_func, log_warning_func=log_warning_func,
+                                                 log_info_func=log_info_func)
 
         # Bind config socket to fpga
         self.config_socket.bind(self.cfg_recv)
@@ -270,14 +283,16 @@ class DCA1000:
         self.lost_packets = None
         self.producer = None
         self.data_queue = None
+        self.time_queue = None
 
-    def start_streaming(self, data_queue):
+    def start_streaming(self, data_queue, time_queue=Queue(30)):
         self.data_queue = data_queue
-        self.producer = Process(target=self.adc_data_streamer.stream, args=(data_queue,))
+        self.time_queue = time_queue
+        self.producer = Process(target=self.adc_data_streamer.stream, args=(data_queue, time_queue,))
         self.producer.start()
 
     def read_adc(self):
-        return self.data_queue.get()
+        return self.data_queue.get(), self.time_queue.get()
 
     def configure(self):
         """Initializes and connects to the FPGA

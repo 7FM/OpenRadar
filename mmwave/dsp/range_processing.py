@@ -12,6 +12,7 @@
 
 import numpy as np
 from . import utils
+from numba import njit, jit
 
 
 def range_resolution(num_adc_samples, dig_out_sample_rate=2500, freq_slope_const=60.012):
@@ -28,15 +29,18 @@ def range_resolution(num_adc_samples, dig_out_sample_rate=2500, freq_slope_const
             band_width (float): The bandwidth of the radar chirp config
     """
     light_speed_meter_per_sec = 299792458
-    freq_slope_m_hz_per_usec = freq_slope_const
-    adc_sample_period_usec = 1000.0 / dig_out_sample_rate * num_adc_samples
-    band_width = freq_slope_m_hz_per_usec * adc_sample_period_usec * 1e6
+    # freq_slope_m_hz_per_usec = freq_slope_const
+    # adc_sample_period_usec = 1000.0 / dig_out_sample_rate * num_adc_samples
+    # band_width = freq_slope_m_hz_per_usec * adc_sample_period_usec * 1e6
+    band_width = freq_slope_const * 1000.0 * num_adc_samples * 1e6 / dig_out_sample_rate;
+    print(dig_out_sample_rate, freq_slope_const, num_adc_samples)
     range_resolution = light_speed_meter_per_sec / (2.0 * band_width)
 
     return range_resolution, band_width
 
 
-def range_processing(adc_data, window_type_1d=None, axis=-1, num_range_bins=256):
+# @jit(parallel=True)
+def range_processing(adc_data, window_type_1d: int=1, axis=-1, num_range_bins=256):
     """Perform 1D FFT on complex-format ADC data.
 
     Perform optional windowing and 1D FFT on the ADC data.

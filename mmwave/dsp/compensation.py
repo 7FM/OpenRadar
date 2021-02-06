@@ -13,7 +13,6 @@
 import math
 from .utils import *
 
-
 def _generate_dft_sin_cos_table(dft_length):
     """Generate SIN/COS table for doppler compensation reference.
 
@@ -36,6 +35,9 @@ def _generate_dft_sin_cos_table(dft_length):
     bins = np.cos(2 * np.pi * bins / dft_length) - 1j * np.sin(2 * np.pi * bins / dft_length)
 
     return dft_sin_cos_table, bins
+
+azimuth_mod_coefs = None
+bins = None
 
 def add_doppler_compensation(input_data,
                              num_tx_antennas,
@@ -69,6 +71,7 @@ def add_doppler_compensation(input_data,
         >>> # feed in the doppler_indices
         >>> dataIn = add_doppler_compensation(dataIn, 3, doppler_indices, 128)
   """
+    global azimuth_mod_coefs, bins
     num_antennas = input_data.shape[1]
     if num_tx_antennas == 1:
         return input_data
@@ -76,7 +79,8 @@ def add_doppler_compensation(input_data,
         raise ValueError("the specified number of transimitters is currently not supported")
 
     # Call the gen function above to generate the tables.
-    azimuth_mod_coefs, bins = _generate_dft_sin_cos_table(int(num_doppler_bins))
+    if azimuth_mod_coefs is None:
+        azimuth_mod_coefs, bins = _generate_dft_sin_cos_table(int(num_doppler_bins))
     
     # Convert signed doppler indices to unsigned and divide Doppler index by 2.
     if doppler_indices is not None:
@@ -102,16 +106,18 @@ def add_doppler_compensation(input_data,
 
     # Rotate
     azimuth_values = input_data[:, int(np.ceil(num_antennas/num_tx_antennas)):, :]
-    # for azi_val in azimuth_values:
-    for i in range(azimuth_values.shape[1]):
-        azi_val = azimuth_values[:, i, :]
-        # Re = exp_doppler_compensation.real.T * azi_val.imag - exp_doppler_compensation.imag.T * azi_val.real
-        # Im = exp_doppler_compensation.imag.T * azi_val.imag + exp_doppler_compensation.real.T * azi_val.real
-        # input_data[:, int(np.ceil(num_antennas/num_tx_antennas))+i, :] = Re + 1j * Im
-        input_data[:, int(np.ceil(num_antennas / num_tx_antennas)) + i, :] = azi_val * exp_doppler_compensation.T
-
+    for idx, azi_val in enumerate(azimuth_values):
+        # azi_val_old = np.copy(azi_val)
+        Re = exp_doppler_compensation.real.T * azi_val.imag - exp_doppler_compensation.imag.T * azi_val.real
+        Im = exp_doppler_compensation.imag.T * azi_val.imag + exp_doppler_compensation.real.T * azi_val.real
+        input_data[idx, int(np.ceil(num_antennas/num_tx_antennas)):, :] = Re + 1j * Im
+    # for i in range(azimuth_values.shape[1]):
+    #     azi_val = azimuth_values[:, i, :]
+    #     # Re = exp_doppler_compensation.real.T * azi_val.imag - exp_doppler_compensation.imag.T * azi_val.real
+    #     # Im = exp_doppler_compensation.imag.T * azi_val.imag + exp_doppler_compensation.real.T * azi_val.real
+    #     # input_data[:, int(np.ceil(num_antennas/num_tx_antennas))+i, :] = Re + 1j * Im
+    #     input_data[:, int(np.ceil(num_antennas / num_tx_antennas)) + i, :] = azi_val * exp_doppler_compensation.T
     return input_data
-
 
 def rx_channel_phase_bias_compensation(rx_channel_compensations, input, num_antennas):
     """Compensation of rx channel phase bias.
@@ -122,6 +128,7 @@ def rx_channel_phase_bias_compensation(rx_channel_compensations, input, num_ante
         num_antennas: number of symbols.
     """
     azimuth_values = input[:, :num_antennas, :]
+    rx_channel_compensations = rx_channel_compensations[[0,1,2,3,8,9,10,11,4,5,6,7]]  # reorder antennas
     rx_channel_compensations_values = rx_channel_compensations[:num_antennas]
 
     for rx_virt_ch in range(azimuth_values.shape[1]):
@@ -138,15 +145,7 @@ def rx_channel_phase_bias_compensation(rx_channel_compensations, input, num_ante
     return
 
 
-def near_field_correction(idx,
-                          detected_objects,
-                          start_range_index, 
-                          end_range_index,
-                          azimuth_input,
-                          azimuth_output,
-                          num_angle_bins, 
-                          num_rx_antennas, 
-                          range_resolution):
+def near_field_correction(detected_objects, azimuth_ant_near, num_angle_bins, num_rx, range_resolution, comp_range_bias):
     """Correct phase error as the far-field plane wave assumption breaks.
 
     Calculates near field correction for input detected index (corresponding
@@ -170,22 +169,23 @@ def near_field_correction(idx,
         None. azimuth_output is changed in-place.
     """
 
-    LAMBDA_77GHz_MILLIMETER = 3e8 / 77e9
+    # LAMBDA_77GHz_MILLIMETER = 3e8 / 77e9
+    LAMBDA_77GHz_MILLIMETER = 3.8e8 / 79e9
     MMWDEMO_TWO_PI_OVER_LAMBDA = 2.0 * math.pi / LAMBDA_77GHz_MILLIMETER
 
     # Sanity check and check if nearFieldCorrection is necessary.
-    assert idx >= 0 and idx < MAX_OBJ_OUT, "idx is out of bound!"
-    rangeIdx = detected_objects['rangeIdx'][idx]
-    if rangeIdx < start_range_index or rangeIdx >= end_range_index:
-        print("{} is out of the nearFieldCorrection range".format(rangeIdx))
-        return
+    # assert idx >= 0 and idx < MAX_OBJ_OUT, "idx is out of bound!"
+    # rangeIdx = detected_objects['rangeIdx'][idx]
+    # if rangeIdx < start_range_index or rangeIdx >= end_range_index:
+    #     print("{} is out of the nearFieldCorrection range".format(rangeIdx))
+    #     return
 
     # num_angle_bins = 64
-    azimuth_input[:num_angle_bins] = 0
-    azimuth_input[num_rx_antennas: num_rx_antennas + num_rx_antennas] = azimuth_input[num_angle_bins:]
+    # azimuth_input[:num_angle_bins] = 0
+    # azimuth_input[num_rx_antennas: num_rx_antennas + num_rx_antennas] = azimuth_input[num_angle_bins:]
 
     # azimuth_output has length of 2*num_angle_bins.
-    azimuth_output[num_angle_bins:] = np.fft.fft(azimuth_input, n=num_angle_bins)
+    # azimuth_output[num_angle_bins:] = np.fft.fft(azimuth_input, n=num_angle_bins)
 
     # #define MMWDEMO_NEAR_FIELD_A (0)
     # B can be changed to position the desired reference (boresight) in the geometry */
@@ -199,7 +199,8 @@ def near_field_correction(idx,
                        "B": LAMBDA_77GHz_MILLIMETER,
                        "C": 2 * LAMBDA_77GHz_MILLIMETER,
                        "D": 2 * LAMBDA_77GHz_MILLIMETER + 8.7,
-                       "E": (2 + 1.5) * LAMBDA_77GHz_MILLIMETER + 8.7}
+                       "E": ((2 * LAMBDA_77GHz_MILLIMETER + 8.7) + 1.5 * LAMBDA_77GHz_MILLIMETER)}
+                       # "E": (2 + 1.5) * LAMBDA_77GHz_MILLIMETER + 8.7}
 
     # AB, CB, DB, EB
     geometry_lines = np.array([geometry_points["A"] - geometry_points["B"],
@@ -209,40 +210,148 @@ def near_field_correction(idx,
 
     geometry_lines_square = geometry_lines * geometry_lines
 
-    range_in_millimeter = (detected_objects['rangeIdx'][idx] * range_resolution - range_resolution) * 1000
+    azimuth_ant_near_padded = np.zeros((num_angle_bins, azimuth_ant_near.shape[1] * 2), dtype=np.complex)
+    # copy virtual antenna symbols in the right place
+    azimuth_ant_near_padded[:1 * num_rx, 0::2] = azimuth_ant_near[:1 * num_rx, :]
+    azimuth_ant_near_padded[1 * num_rx:azimuth_ant_near.shape[0], 1::2] = azimuth_ant_near[1 * num_rx:, :]
+    azimuth_near_fft = np.fft.fftshift(np.fft.fft(azimuth_ant_near_padded, axis=0), axes=0)
+    # range_in_millimeter = (detected_objects['rangeIdx'][idx] * range_resolution - range_resolution) * 1000
+    range_in_millimeter = (detected_objects['rangeIdx'] * range_resolution - comp_range_bias) * 1000  # shape (1, num_det_objs_near)
     range_squared = range_in_millimeter * range_in_millimeter
     theta_incrementation = 2.0 / num_angle_bins
 
-    for i in range(num_angle_bins):
-        theta = i * theta_incrementation if i < num_angle_bins / 2 else (i - num_angle_bins) * theta_incrementation
+    # theta = np.hstack((np.arange(0, num_angle_bins // 2),
+    #                    np.arange(-num_angle_bins // 2, 0))).reshape(-1, 1)
+    # theta = np.hstack(np.arange(num_angle_bins)).reshape(-1, 1)  # Make a row vector, shape (num_angle_bins, 1)
+    theta = np.arange(-num_angle_bins // 2, num_angle_bins // 2).reshape(-1, 1)
+    # for i in range(num_angle_bins):
+    #     theta = i * theta_incrementation if i < num_angle_bins // 2 else (i - num_angle_bins) * theta_incrementation
+    theta = theta * theta_incrementation
+    try:
+        # tx1 = np.sqrt(range_squared + geometry_lines_square[1] - range_in_millimeter * theta * geometry_lines[1] * 2)
+        # rx4 = np.sqrt(range_squared + geometry_lines_square[2] - range_in_millimeter * theta * geometry_lines[2] * 2)
+        # tx2 = np.sqrt(range_squared + geometry_lines_square[0] - range_in_millimeter * theta * -geometry_lines[0] * 2)
+        # rx1 = np.sqrt(range_squared + geometry_lines_square[3] - range_in_millimeter * theta * geometry_lines[3] * 2)
+        tx1 = np.sqrt(range_squared + geometry_lines_square[1] - range_in_millimeter * theta * geometry_lines[1] / (num_angle_bins // 4))  # TODO 16 only valid at 64 angle bins!
+        rx4 = np.sqrt(range_squared + geometry_lines_square[2] - range_in_millimeter * theta * geometry_lines[2] / (num_angle_bins // 4))
+        tx2 = np.sqrt(range_squared + geometry_lines_square[0] - range_in_millimeter * theta * -geometry_lines[0] / (num_angle_bins // 4))
+        rx1 = np.sqrt(range_squared + geometry_lines_square[3] - range_in_millimeter * theta * geometry_lines[3] / (num_angle_bins // 4))
+    except Exception as e:
+        print(e)
+    # if range > 0:
+    psi = MMWDEMO_TWO_PI_OVER_LAMBDA * ((tx2 + rx1) - (rx4 + tx1)) - np.pi * theta / (num_angle_bins // 2)
+    exp_psi = np.exp(-1j * psi)
+    azimuth_out = azimuth_near_fft[:, 0::2] + azimuth_near_fft[:, 1::2] * exp_psi
 
-        tx1 = np.sqrt(range_squared + geometry_lines_square[1] - range_in_millimeter * theta * geometry_lines[1] * 2)
-        rx4 = np.sqrt(range_squared + geometry_lines_square[2] - range_in_millimeter * theta * geometry_lines[2] * 2)
-        tx2 = np.sqrt(range_squared + geometry_lines_square[0] - range_in_millimeter * theta * geometry_lines[0] * 2)
-        rx1 = np.sqrt(range_squared + geometry_lines_square[3] - range_in_millimeter * theta * geometry_lines[3] * 2)
+            # corrReal = np.cos(psi)
+            # corrImag = np.sin(-psi)
 
-        if range > 0:
-            psi = MMWDEMO_TWO_PI_OVER_LAMBDA * ((tx2 + rx1) - (rx4 + tx1)) - np.pi * theta
-            corrReal = np.cos(psi)
-            corrImag = np.sin(-psi)
+        # out1CorrReal = azimuth_output[num_angle_bins + i].real * corrReal + \
+        #                azimuth_output[num_angle_bins + i].imag * corrImag
+        # out1CorrImag = azimuth_output[num_angle_bins + i].imag * corrReal + \
+        #                azimuth_output[num_angle_bins + i].real * corrImag
+        #
+        # azimuth_output[i] = (azimuth_output[i].real + out1CorrReal) + \
+        #                 (azimuth_output[i].imag + out1CorrImag) * 1j
+      # reorder for normal processing
+    # return azimuth_out
+    return np.fft.ifftshift(azimuth_out, axes=0)
+    # return np.vstack((azimuth_out[num_angle_bins//2:], azimuth_out[:num_angle_bins//2]))
 
-        out1CorrReal = azimuth_output[num_angle_bins + i].real * corrReal + \
-                       azimuth_output[num_angle_bins + i].imag * corrImag
-        out1CorrImag = azimuth_output[num_angle_bins + i].imag * corrReal + \
-                       azimuth_output[num_angle_bins + i].real * corrImag
 
-        azimuth_output[i] = (azimuth_output[i].real + out1CorrReal) + \
-                        (azimuth_output[i].imag + out1CorrImag) * 1j
+class DcRangeSignatureRemoval:
+    def __init__(self, radar_cube, positive_bin_idx, negative_bin_idx, num_tx, num_acc_chirps, per_angle=False):
+        self.per_angle = per_angle
+        self.new_calibration(radar_cube, positive_bin_idx, negative_bin_idx, num_acc_chirps, num_tx)
 
-    return
+    def new_calibration(self, radar_cube, positive_bin_idx, negative_bin_idx, num_acc_chirps, num_tx, num_frames=30):
+        self.positive_bin_idx = positive_bin_idx if positive_bin_idx > 0 else 1
+        self.negative_bin_idx = -abs(negative_bin_idx) if abs(negative_bin_idx) > 0 else -1
+        self.num_acc_chirps = num_acc_chirps
+        if not self.per_angle:
+            assert num_acc_chirps > radar_cube.shape[0] // num_tx, \
+                "Number of Chirps to accumulate ({}) must be greater than the number of Doppler Bins ({})".format(
+                    num_acc_chirps, radar_cube.shape[0] // num_tx)
+        self.num_tx = num_tx
+        self.dc_average_pos = np.zeros((self.num_tx, self.positive_bin_idx), dtype=np.complex128)
+        self.dc_average_neg = np.zeros((self.num_tx, abs(self.negative_bin_idx)), dtype=np.complex128)
+        self.is_calibrated = False
+        self.num_acc_chirps_done = 0
+        self.angle_res = 360 // num_frames
+        self.avg_per_angles_pos = np.zeros((num_frames, self.num_tx, self.positive_bin_idx), dtype=np.complex128)
+        self.avg_per_angles_neg = np.zeros((num_frames, self.num_tx, abs(self.negative_bin_idx)),
+                                           dtype=np.complex128)
+        self.num_acc_chirps_done_per_angle = np.zeros(num_frames)
 
+    def get_angle_idx(self, current_angle):
+        angle_idx = np.round(((current_angle + np.pi) * 180 / np.pi) / self.angle_res)
+        if angle_idx >= len(self.num_acc_chirps_done_per_angle):
+            angle_idx = 0
+        return int(angle_idx)
+
+    def remove_dc_average(self, radar_cube, current_angle=None):
+        if self.is_calibrated:
+            if self.num_tx == 2:
+                if self.per_angle and current_angle is not None:
+                    angle_idx = self.get_angle_idx(current_angle)
+                    radar_cube[0::2, :, :self.positive_bin_idx] -= self.avg_per_angles_pos[angle_idx, 0, :]
+                    radar_cube[0::2, :, self.negative_bin_idx:] -= self.avg_per_angles_neg[angle_idx, 0, :]
+                    radar_cube[1::2, :, :self.positive_bin_idx] -= self.avg_per_angles_pos[angle_idx, 1, :]
+                    radar_cube[1::2, :, self.negative_bin_idx:] -= self.avg_per_angles_neg[angle_idx, 1, :]
+                else:
+                    radar_cube[0::2, :, :self.positive_bin_idx] -= self.dc_average_pos[0, :]
+                    radar_cube[0::2, :, self.negative_bin_idx:] -= self.dc_average_neg[0, :]
+                    radar_cube[1::2, :, :self.positive_bin_idx] -= self.dc_average_pos[1, :]
+                    radar_cube[1::2, :, self.negative_bin_idx:] -= self.dc_average_neg[1, :]
+            if self.num_tx == 3:
+                radar_cube[0::3, :, :self.positive_bin_idx] -= self.dc_average_pos[0, :]
+                radar_cube[0::3, :, self.negative_bin_idx:] -= self.dc_average_neg[0, :]
+                radar_cube[1::3, :, :self.positive_bin_idx] -= self.dc_average_pos[1, :]
+                radar_cube[1::3, :, self.negative_bin_idx:] -= self.dc_average_neg[1, :]
+                radar_cube[2::3, :, :self.positive_bin_idx] -= self.dc_average_pos[2, :]
+                radar_cube[2::3, :, self.negative_bin_idx:] -= self.dc_average_neg[2, :]
+            return radar_cube
+        else:
+            if self.per_angle and current_angle is not None:
+                angle_idx = self.get_angle_idx(current_angle)
+                self.avg_per_angles_pos[angle_idx, 0, :] += np.sum(radar_cube[0::2, :, :self.positive_bin_idx], axis=(0, 1))
+                self.avg_per_angles_neg[angle_idx, 0, :] += np.sum(radar_cube[0::2, :, self.negative_bin_idx:], axis=(0, 1))
+                self.avg_per_angles_pos[angle_idx, 1, :] += np.sum(radar_cube[1::2, :, :self.positive_bin_idx], axis=(0, 1))
+                self.avg_per_angles_neg[angle_idx, 1, :] += np.sum(radar_cube[1::2, :, self.negative_bin_idx:], axis=(0, 1))
+                self.num_acc_chirps_done_per_angle[angle_idx] += 1
+            else:
+                self.dc_average_pos[0, :] += np.sum(radar_cube[0::2, :, :self.positive_bin_idx], axis=(0, 1))  # np.sum(radar_cube[0::2, :, :self.positive_bin_idx], axis=0)
+                self.dc_average_neg[0, :] += np.sum(radar_cube[0::2, :, self.negative_bin_idx:], axis=(0, 1))
+                self.dc_average_pos[1, :] += np.sum(radar_cube[1::2, :, :self.positive_bin_idx], axis=(0, 1))
+                self.dc_average_neg[1, :] += np.sum(radar_cube[1::2, :, self.negative_bin_idx:], axis=(0, 1))
+                self.num_acc_chirps_done += radar_cube.shape[0] // self.num_tx
+
+            if self.per_angle and current_angle is not None:
+                if np.min(self.num_acc_chirps_done_per_angle) >= self.num_acc_chirps:
+                    for idx, div_ in enumerate(self.num_acc_chirps_done_per_angle):
+                        self.avg_per_angles_pos[idx] /= (div_ * radar_cube.shape[0] // self.num_tx)
+                        self.avg_per_angles_neg[idx] /= (div_ * radar_cube.shape[0] // self.num_tx)
+                        # self.avg_per_angles_pos = np.divide(self.avg_per_angles_pos, self.num_acc_chirps_done)
+                        # self.avg_per_angles_neg = np.divide(self.avg_per_angles_neg, self.num_acc_chirps_done)
+                    self.is_calibrated = True
+                    return self.remove_dc_average(radar_cube, current_angle=current_angle)
+            elif self.num_acc_chirps_done >= self.num_acc_chirps:
+                self.dc_average_pos = np.divide(self.dc_average_pos, self.num_acc_chirps_done)
+                self.dc_average_neg = np.divide(self.dc_average_neg, self.num_acc_chirps_done)
+                self.is_calibrated = True
+                return self.remove_dc_average(radar_cube, current_angle=current_angle)
+            return radar_cube
+
+
+dcRangeSignatureRemoval = None
 
 def dc_range_signature_removal(fft_out1_d,
                                positive_bin_idx,
                                negative_bin_idx,
-                               calib_dc_range_sig_cfg,
                                num_tx_antennas,
-                               num_chirps_per_frame):
+                               num_acc_chirps,
+                               new_calibration=False, current_angle=None):
+    global dcRangeSignatureRemoval
     """Compensation of DC range antenna signature.
 
     Antenna coupling signature dominates the range bins close to the radar. These are the bins in the range FFT output 
@@ -255,7 +364,7 @@ def dc_range_signature_removal(fft_out1_d,
     removal starts for all subsequent frames during which each of the bin/antenna average estimate is subtracted from 
     the corresponding received samples in real-time for subsequent processing.
 
-    This function has a measurement phase while calib_dc_range_sig_cfg.counter is less than the preferred value and calibration 
+    This function has a measurement phase while calib_dc_range_sig_cfg.counter is less than the preferred value and calibration
     phase afterwards. The original function is performed per chirp. Here it is modified to be called per frame.
 
     Args:
@@ -269,37 +378,45 @@ def dc_range_signature_removal(fft_out1_d,
     Returns:
         None. fft_out1_d is modified in-place.
     """
-    if not calib_dc_range_sig_cfg.counter:
-        calib_dc_range_sig_cfg.mean.fill(0)
+    if dcRangeSignatureRemoval is None:
+        per_angle = False
+        if current_angle is not None:
+            per_angle = True
+        dcRangeSignatureRemoval = DcRangeSignatureRemoval(fft_out1_d, positive_bin_idx, negative_bin_idx,
+                                                          num_tx_antennas, num_acc_chirps, per_angle=per_angle)
+    if new_calibration:
+        dcRangeSignatureRemoval.new_calibration(fft_out1_d, positive_bin_idx, negative_bin_idx, num_tx_antennas,
+                                                num_acc_chirps)
 
-    # Calibration
-    if calib_dc_range_sig_cfg.counter < calib_dc_range_sig_cfg.num_frames * num_tx_antennas:
-        # Accumulate
-        calib_dc_range_sig_cfg.mean[0, :positive_bin_idx + 1] = np.sum(
-            fft_out1_d[0::2, :, :positive_bin_idx + 1],
-            axis=(0, 1))
-        calib_dc_range_sig_cfg.mean[0, positive_bin_idx + 1:] = np.sum(fft_out1_d[0::2, :, negative_bin_idx:],
-                                                                                 axis=(0, 1))
-
-        calib_dc_range_sig_cfg.mean[1, :positive_bin_idx + 1] = np.sum(
-            fft_out1_d[1::2, :, :positive_bin_idx + 1],
-            axis=(0, 1))
-        calib_dc_range_sig_cfg.mean[1, positive_bin_idx + 1:] = np.sum(fft_out1_d[1::2, :, negative_bin_idx:],
-                                                                                 axis=(0, 1))
-
-        calib_dc_range_sig_cfg.counter += 1
-
-        if calib_dc_range_sig_cfg.counter == (calib_dc_range_sig_cfg.num_frames * num_tx_antennas):
-            # Divide
-            num_avg_chirps = calib_dc_range_sig_cfg.num_frames * num_chirps_per_frame
-            calib_dc_range_sig_cfg.mean /= num_avg_chirps
-
-    else:
-        # fft_out1_d -= mean
-        fft_out1_d[0::2, :, :positive_bin_idx + 1] -= calib_dc_range_sig_cfg.mean[0, :positive_bin_idx + 1]
-        fft_out1_d[0::2, :, positive_bin_idx + 1:] -= calib_dc_range_sig_cfg.mean[0, positive_bin_idx + 1:]
-        fft_out1_d[1::2, :, :positive_bin_idx + 1] -= calib_dc_range_sig_cfg.mean[1, :positive_bin_idx + 1]
-        fft_out1_d[1::2, :, positive_bin_idx + 1:] -= calib_dc_range_sig_cfg.mean[1, positive_bin_idx + 1:]
+    return dcRangeSignatureRemoval.remove_dc_average(fft_out1_d, current_angle=current_angle)
+    # # Calibration
+    # if calib_dc_range_sig_cfg.counter < calib_dc_range_sig_cfg.num_frames * num_tx_antennas:
+    #     # Accumulate
+    #     calib_dc_range_sig_cfg.mean[0, :positive_bin_idx + 1] = np.sum(
+    #         fft_out1_d[0::2, :, :positive_bin_idx + 1],
+    #         axis=(0, 1))
+    #     calib_dc_range_sig_cfg.mean[0, positive_bin_idx + 1:] = np.sum(fft_out1_d[0::2, :, negative_bin_idx:],
+    #                                                                              axis=(0, 1))
+    #
+    #     calib_dc_range_sig_cfg.mean[1, :positive_bin_idx + 1] = np.sum(
+    #         fft_out1_d[1::2, :, :positive_bin_idx + 1],
+    #         axis=(0, 1))
+    #     calib_dc_range_sig_cfg.mean[1, positive_bin_idx + 1:] = np.sum(fft_out1_d[1::2, :, negative_bin_idx:],
+    #                                                                              axis=(0, 1))
+    #
+    #     calib_dc_range_sig_cfg.counter += 1
+    #
+    #     if calib_dc_range_sig_cfg.counter == (calib_dc_range_sig_cfg.num_frames * num_tx_antennas):
+    #         # Divide
+    #         num_avg_chirps = calib_dc_range_sig_cfg.num_frames * num_chirps_per_frame
+    #         calib_dc_range_sig_cfg.mean /= num_avg_chirps
+    #
+    # else:
+    #     # fft_out1_d -= mean
+    #     fft_out1_d[0::2, :, :positive_bin_idx + 1] -= calib_dc_range_sig_cfg.mean[0, :positive_bin_idx + 1]
+    #     fft_out1_d[0::2, :, positive_bin_idx + 1:] -= calib_dc_range_sig_cfg.mean[0, positive_bin_idx + 1:]
+    #     fft_out1_d[1::2, :, :positive_bin_idx + 1] -= calib_dc_range_sig_cfg.mean[1, :positive_bin_idx + 1]
+    #     fft_out1_d[1::2, :, positive_bin_idx + 1:] -= calib_dc_range_sig_cfg.mean[1, positive_bin_idx + 1:]
 
 
 def clutter_removal(input_val, axis=0):

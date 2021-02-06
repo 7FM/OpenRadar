@@ -13,7 +13,7 @@
 import numpy as np
 from .utils import *
 from . import compensation
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, peak_widths
 import warnings
 
 
@@ -900,8 +900,9 @@ def range_azimuth_heatmap(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
     # return x_vector, y_vector, 0
 
 
-def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=128, extend_max_vel=True, multi_obj_beamforming=None,
-              det_objs=None):
+def naive_xyz(virtual_ant, num_tx=2, num_rx=4, fft_size=64, extend_max_vel=True, multi_obj_beamforming=None,
+              det_objs=None, num_doppler_bins=16, near_field_corr_end_idx=None,
+              range_resolution=0.04, comp_range_bias=0.0):
     """ Estimate the phase introduced from the elevation of the elevation antennas
 
     Args:
@@ -919,21 +920,37 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=128, extend_max_vel=True
         z_vector (float): Estimated z axis coordinate in meters (m)
 
     """
-    assert num_tx > 2, "need a config for more than 2 TXs"
+    # assert num_tx > 2, "need a config for more than 2 TXs"
+
     num_detected_obj = virtual_ant.shape[1]
 
+    # do near field correction for points in range: rangeIdx < near_field_corr_end_idx
+    # far_field_mask = np.ones(len(det_objs['rangeIdx']), dtype=np.bool)
+    far_field_idx = 0  # slicing is faster than masking
+    if near_field_corr_end_idx is not None and len(det_objs['rangeIdx']) > 0:
+        # near_field_mask = (det_objs['rangeIdx'] < near_field_corr_end_idx)
+        far_field_idx = np.argmax((det_objs['rangeIdx'] > near_field_corr_end_idx))
+        if far_field_idx > 0:  # are there objects in near field?
+            # far_field_mask = np.logical_not(near_field_mask)
+            azimuth_ant_near = virtual_ant[:2 * num_rx, :][:, :far_field_idx]
+            azimuth_fft_near = compensation.near_field_correction(det_objs[:far_field_idx], azimuth_ant_near, fft_size,
+                                                                  num_rx, range_resolution, comp_range_bias)
+
     # Zero pad azimuth
-    azimuth_ant = virtual_ant[:2 * num_rx, :]
+    azimuth_ant = virtual_ant[:2 * num_rx, :][:, far_field_idx:]
     azimuth_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex_)
-    azimuth_ant_padded[:2 * num_rx, :] = azimuth_ant
+    azimuth_ant_padded[:2 * num_rx, far_field_idx:] = azimuth_ant
 
     # Process azimuth information
+    # azimuth_fft = np.abs(np.fft.fft(azimuth_ant_padded, axis=0))
     azimuth_fft = np.fft.fft(azimuth_ant_padded, axis=0)
-
+    if far_field_idx > 0:
+        # azimuth_fft[:, :far_field_idx] = np.abs(azimuth_fft_near)
+        azimuth_fft[:, :far_field_idx] = azimuth_fft_near
     # k_max_mask = np.ones(num_detected_obj, dtype=np.bool)
     # velocity disambig.
     if extend_max_vel:
-        azimuth_ant_corrected = np.copy(azimuth_ant)
+        azimuth_ant_corrected = np.copy(virtual_ant[:2 * num_rx, :])
         azimuth_ant_corrected[num_rx:] = np.negative(azimuth_ant_corrected[num_rx:])
         azimuth_ant_padded_corrected = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex_)
         azimuth_ant_padded_corrected[:2 * num_rx, :] = azimuth_ant_corrected
@@ -943,13 +960,27 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=128, extend_max_vel=True
         k_max_peaks = np.max(np.abs(azimuth_fft), axis=0)
         k_max_peaks_corrected = np.max(np.abs(azimuth_fft_corrected), axis=0)
         k_max_mask = (k_max_peaks > k_max_peaks_corrected)
+        k_max_mask_corrected = np.logical_not(k_max_mask)
+
+        for v_corr_idx in np.argwhere(k_max_mask_corrected).flatten():
+            if det_objs['dopplerIdxSigned'][v_corr_idx] < 0:  # v_est < 0
+                det_objs['dopplerIdxSigned'][v_corr_idx] = \
+                    det_objs['dopplerIdxSigned'][v_corr_idx] + 2 * num_doppler_bins // 2
+            else:
+                det_objs['dopplerIdxSigned'][v_corr_idx] = \
+                    det_objs['dopplerIdxSigned'][v_corr_idx] - 2 * num_doppler_bins // 2
 
         #max indices:
         k_max_normal = np.argmax(np.abs(azimuth_fft), axis=0)  # shape = (num_detected_obj, )
         k_max_corrected = np.argmax(np.abs(azimuth_fft_corrected), axis=0)
-        k_max = k_max_mask * k_max_normal + np.logical_not(k_max_mask) * k_max_corrected
+        k_max = k_max_mask * k_max_normal + k_max_mask_corrected * k_max_corrected
+
+        azimuth_fft = np.abs(k_max_mask * azimuth_fft + np.logical_not(k_max_mask) * azimuth_fft_corrected)  # TODO?
+        azimuth_fft_corrected = np.abs(azimuth_fft_corrected)
     else:
         k_max = np.argmax(np.abs(azimuth_fft), axis=0)
+
+        azimuth_fft = np.abs(azimuth_fft)  # mag square
 
     # peak_1 = azimuth_fft[k_max]
     peak_1 = np.zeros_like(k_max, dtype=np.complex_)
@@ -960,18 +991,33 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=128, extend_max_vel=True
     if multi_obj_beamforming is not None:
         peaks = np.zeros(len(k_max), dtype=np.object)
         if extend_max_vel:
-            corrected_fft = k_max_mask * np.abs(azimuth_fft) + np.logical_not(k_max_mask) * np.abs(azimuth_fft_corrected)
-        else: 
-            corrected_fft = np.abs(azimuth_fft)
+            # corrected_fft = k_max_mask * np.abs(azimuth_fft) + np.logical_not(k_max_mask) * np.abs(azimuth_fft_corrected)
+            corrected_fft = k_max_mask * azimuth_fft + np.logical_not(k_max_mask) * azimuth_fft_corrected
+        else:
+            # corrected_fft = np.abs(azimuth_fft)
+            corrected_fft = azimuth_fft
         for i in range(len(k_max)):
             # peaks[i] = find_peaks(corrected_fft[:, i], height=multi_obj_beamforming * corrected_fft[k_max[i], i])[0]
-            for new_peak in find_peaks(corrected_fft[:, i], height=multi_obj_beamforming * corrected_fft[k_max[i], i])[0]:
-                if new_peak != k_max[i]:
-                    virtual_ant = np.c_[virtual_ant, virtual_ant[:, i]]
-                    det_objs = np.r_[det_objs, det_objs[i]]
-                    k_max = np.r_[k_max, new_peak]
-                    peak_1 = np.r_[peak_1, azimuth_fft[new_peak, i]]
-                    num_detected_obj += 1
+            max_peak = 0
+            max_peak_val = 0
+            # for new_peak in find_peaks(corrected_fft[:, i], height=multi_obj_beamforming * corrected_fft[k_max[i], i])[0]:
+            #     if new_peak != k_max[i]:
+            new_peaks = find_peaks(corrected_fft[:, i], height=multi_obj_beamforming * corrected_fft[k_max[i], i])[0]
+            if len(new_peaks) > 1:
+                for new_peak in new_peaks:
+                    if new_peak != k_max[i]:
+                        if max_peak_val < corrected_fft[new_peak, i]:
+                            max_peak = new_peak
+                            max_peak_val = corrected_fft[new_peak, i]
+                virtual_ant = np.c_[virtual_ant, virtual_ant[:, i]]
+                det_objs = np.r_[det_objs, det_objs[i]]
+                azimuth_fft = np.c_[azimuth_fft, azimuth_fft[:, i]]
+                det_objs[-1]['peakVal'] = det_objs[-1]['peakVal'] * corrected_fft[max_peak, i] / corrected_fft[k_max[i], i]  # TODO is reducing peak val valid?
+                k_max = np.r_[k_max, max_peak]
+                # peak_1 = np.r_[peak_1, azimuth_fft[max_peak, i]]
+                peak_1 = np.r_[peak_1, corrected_fft[max_peak, i]]
+                num_detected_obj += 1
+                    # break  # only 1 extra point!
         # new_peaks = len(np.hstack(peaks.flatten()))
         # virtual_ant_new = np.resize(virtual_ant, (virtual_ant.shape[0], new_peaks))
         # range_idx_new = np.resize(range_idx, new_peaks)
@@ -982,36 +1028,65 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=128, extend_max_vel=True
         #             range_idx_new[i] = range_idx[i]
         #             virtual_ant[:, i] = virtual_ant[:, i]
         #             k_max[]
-                
 
+    for k_max_idx in np.arange(len(k_max)):
+        # peak_width, peak_power, peak_l, peak_r = peak_widths(np.roll(azimuth_fft[:, k_max_idx], -k_max[k_max_idx] - 32),
+        #                                                      [32], rel_height=0.5)
+        peak_width, peak_power, peak_l, peak_r = peak_widths(np.roll(azimuth_fft[:, k_max_idx], -k_max[k_max_idx] - fft_size // 2),
+                                                             [fft_size // 2], rel_height=0.5)
+        # obj_dict, total_power = peak_search_full_variance(azimuth_fft[:, k_max_idx], fft_size, sidelobe_level=0.9)
+        # num_out = len(obj_dict)
+        # estimated_variance = variance_estimation(num_out, est_resolution, obj_dict, total_power)
+        det_objs[k_max_idx]['angleVar'] = peak_width
+        # det_objs[k_max_idx]['angleMean'] = peak_l + peak_width / 2 + (k_max[k_max_idx] - 32)
+        det_objs[k_max_idx]['angleMean'] = peak_l + peak_width / 2 + (k_max[k_max_idx] - fft_size // 2)
+        # i = 6
+        # res = peak_widths(np.roll(azimuth_fft[:, i], -k_max[i] - 32), [32], rel_height=0.666)
+        # plt.plot(np.roll(azimuth_fft[:, i], -k_max[i] - 32))
+        # plt.hlines(*res[1:], color="C2")
+        # plt.show()
 
-    k_max[k_max > (fft_size // 2) - 1] = k_max[k_max > (fft_size // 2) - 1] - fft_size
+    # k_max[far_field_idx:][k_max[far_field_idx:] > (fft_size // 2) - 1] = \
+    #     k_max[far_field_idx:][k_max[far_field_idx:] > (fft_size // 2) - 1] - (fft_size)
+    k_max[k_max > (fft_size // 2) - 1] = k_max[k_max > (fft_size // 2) - 1] - (fft_size)  # TODO fft_size - 1 or not?
     wx = 2 * np.pi / fft_size * k_max  # shape = (num_detected_obj, )
     x_vector = wx / np.pi
 
-    # Zero pad elevation
-    elevation_ant = virtual_ant[2 * num_rx:, :]
-    elevation_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex_)
-    # elevation_ant_padded[:len(elevation_ant)] = elevation_ant
-    elevation_ant_padded[:num_rx, :] = elevation_ant
+    # import matplotlib
+    # from mpl_toolkits.mplot3d import Axes3D
+    # matplotlib.use('tkagg')
+    # import matplotlib.pyplot as plt
+    # plt.ion()
+    # plt.plot(k_max)
+    # plt.show()
+    det_objs['azimuth'] = k_max
 
-    # Process elevation information
-    elevation_fft = np.fft.fft(elevation_ant, axis=0)
-    elevation_max = np.argmax(np.log2(np.abs(elevation_fft)), axis=0)  # shape = (num_detected_obj, )
-    peak_2 = np.zeros_like(elevation_max, dtype=np.complex_)
-    # peak_2 = elevation_fft[np.argmax(np.log2(np.abs(elevation_fft)))]
-    for i in range(len(elevation_max)):
-        peak_2[i] = elevation_fft[elevation_max[i], i]
+    if num_tx > 2:  # 3d processing
+        # Zero pad elevation
+        elevation_ant = virtual_ant[2 * num_rx:, :]
+        elevation_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex_)
+        # elevation_ant_padded[:len(elevation_ant)] = elevation_ant
+        elevation_ant_padded[:num_rx, :] = elevation_ant
 
-    # Calculate elevation phase shift
-    wz = np.angle(peak_1 * peak_2.conj() * np.exp(1j * 2 * wx))
-    z_vector = wz / np.pi * 0
+        # Process elevation information
+        elevation_fft = np.fft.fft(elevation_ant, axis=0)
+        elevation_max = np.argmax(np.log2(np.abs(elevation_fft)), axis=0)  # shape = (num_detected_obj, )
+        peak_2 = np.zeros_like(elevation_max, dtype=np.complex_)
+        # peak_2 = elevation_fft[np.argmax(np.log2(np.abs(elevation_fft)))]
+        for i in range(len(elevation_max)):
+            peak_2[i] = elevation_fft[elevation_max[i], i]
+
+        # Calculate elevation phase shift
+        wz = np.angle(peak_1 * peak_2.conj() * np.exp(1j * 2 * wx))
+        z_vector = wz / np.pi
+    else:
+        z_vector = np.zeros(len(x_vector))
     y_vector = np.sqrt(1 - x_vector ** 2 - z_vector ** 2)
     return x_vector, y_vector, z_vector, det_objs
 
 
 def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, method='Capon', num_vrx=12, est_range=90,
-                                est_resolution=1):
+                                est_resolution=1, multi_obj_beamforming=0.85):
     """ This function estimates the XYZ location of a series of input detections by performing beamforming on the
     azimuth axis and naive AOA on the vertical axis.
         
@@ -1054,18 +1129,21 @@ def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, m
         raise ValueError("azimuthInput is the wrong shape. Change num_vrx if not using TI 1843 platform")
 
     doa_var_thr = 10
-    num_vec, steering_vec = gen_steering_vec(est_range, est_resolution, 8)
+    num_vec, steering_vec = gen_steering_vec(est_range, est_resolution, num_vrx)
 
     output_e_angles = []
     output_a_angles = []
     output_ranges = []
+    output_ranges_idx = []
 
     for i, inputSignal in enumerate(azimuth_input):
         if method == 'Capon':
-            doa_spectrum, _ = aoa_capon(np.reshape(inputSignal[:8], (8, 1)).T, steering_vec)
+            # doa_spectrum, _ = aoa_capon(np.reshape(inputSignal[:num_vrx], (num_vrx, 1)).T, steering_vec)
+            doa_spectrum, _ = aoa_capon(inputSignal, steering_vec)
             doa_spectrum = np.abs(doa_spectrum)
         elif method == 'Bartlett':
-            doa_spectrum = aoa_bartlett(steering_vec, np.reshape(inputSignal[:8], (8, 1)), axis=0)
+            # doa_spectrum = aoa_bartlett(steering_vec, np.reshape(inputSignal[:num_vrx], (num_vrx, 1)), axis=0)
+            doa_spectrum = aoa_bartlett(steering_vec, inputSignal, axis=0)
             doa_spectrum = np.abs(doa_spectrum).squeeze()
         else:
             doa_spectrum = None
@@ -1073,57 +1151,76 @@ def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, m
         # Find Max Values and Max Indices
 
         #    num_out, max_theta, total_power = peak_search(doa_spectrum)
-        obj_dict, total_power = peak_search_full_variance(doa_spectrum, steering_vec.shape[0], sidelobe_level=0.9)
+        obj_dict, total_power = peak_search_full_variance(doa_spectrum, steering_vec.shape[0],
+                                                          sidelobe_level=multi_obj_beamforming)
         num_out = len(obj_dict)
         max_theta = [obj['peakLoc'] for obj in obj_dict]
 
         estimated_variance = variance_estimation(num_out, est_resolution, obj_dict, total_power)
 
-        higher_rung = inputSignal[8:12]
-        lower_rung = inputSignal[2:6]
         for j in range(num_out):
-            ele_out = aoa_estimation_bf_one_point(4, higher_rung, steering_vec[max_theta[j]])
-            azi_out = aoa_estimation_bf_one_point(4, lower_rung, steering_vec[max_theta[j]])
-            num = azi_out * np.conj(ele_out)
-            wz = np.arctan2(num.imag, num.real) / np.pi
-
-            temp_angle = -est_range + max_theta[
-                j] * est_resolution  # Converts to degrees, centered at boresight (0 degrees)
-            # Make sure the temp angle generated is within bounds
+            temp_angle = -est_range + max_theta[j] * est_resolution
             if np.abs(temp_angle) <= est_range and estimated_variance[j] < doa_var_thr:
-                e_angle = np.arcsin(wz)
-                a_angle = -1 * (np.pi / 180) * temp_angle  # Degrees to radians
-                output_e_angles.append((180 / np.pi) * e_angle)  # Convert radians to degrees
-
-                # print(e_angle)
-                # if (np.sin(a_angle)/np.cos(e_angle)) > 1 or (np.sin(a_angle)/np.cos(e_angle)) < -1:
-                # print("Found you", (np.sin(a_angle)/np.cos(e_angle)))
-                # assert np.cos(e_angle) == np.nan, "Found you"
-
-                # TODO: Not sure how to deal with arg of arcsin >1 or <-1
-#                if np.sin(a_angle)/np.cos(e_angle) > 1:
-#                    output_a_angles.append((180 / np.pi) * np.arcsin(1))
-#                    print("Found a pesky nan")
-#                elif np.sin(a_angle)/np.cos(e_angle) < -1:
-#                    output_a_angles.append((180 / np.pi) * np.arcsin(-1))
-#                    print("Found a pesky nan")
-#                else:
-#                    output_a_angles.append((180 / np.pi) * np.arcsin(np.sin(a_angle)/np.cos(e_angle))) # Why
-
-                output_a_angles.append((180 / np.pi) * np.arcsin(np.sin(a_angle) * np.cos(e_angle)))  # Why
-
                 output_ranges.append(input_ranges[i])
+                output_ranges_idx.append(i)
+                output_a_angles.append(max_theta[j])
+                output_e_angles.append(0)  # no elevation
+#         higher_rung = inputSignal[8:12]
+#         lower_rung = inputSignal[2:6]
+#         for j in range(num_out):
+#             ele_out = aoa_estimation_bf_one_point(4, higher_rung, steering_vec[max_theta[j]])
+#             azi_out = aoa_estimation_bf_one_point(4, lower_rung, steering_vec[max_theta[j]])
+#             num = azi_out * np.conj(ele_out)
+#             wz = np.arctan2(num.imag, num.real) / np.pi
+#
+#             temp_angle = -est_range + max_theta[
+#                 j] * est_resolution  # Converts to degrees, centered at boresight (0 degrees)
+#             # Make sure the temp angle generated is within bounds
+#             if np.abs(temp_angle) <= est_range and estimated_variance[j] < doa_var_thr:
+#                 e_angle = np.arcsin(wz)
+#                 a_angle = -1 * (np.pi / 180) * temp_angle  # Degrees to radians
+#                 output_e_angles.append((180 / np.pi) * e_angle)  # Convert radians to degrees
+#
+#                 # print(e_angle)
+#                 # if (np.sin(a_angle)/np.cos(e_angle)) > 1 or (np.sin(a_angle)/np.cos(e_angle)) < -1:
+#                 # print("Found you", (np.sin(a_angle)/np.cos(e_angle)))
+#                 # assert np.cos(e_angle) == np.nan, "Found you"
+#
+#                 # TODO: Not sure how to deal with arg of arcsin >1 or <-1
+# #                if np.sin(a_angle)/np.cos(e_angle) > 1:
+# #                    output_a_angles.append((180 / np.pi) * np.arcsin(1))
+# #                    print("Found a pesky nan")
+# #                elif np.sin(a_angle)/np.cos(e_angle) < -1:
+# #                    output_a_angles.append((180 / np.pi) * np.arcsin(-1))
+# #                    print("Found a pesky nan")
+# #                else:
+# #                    output_a_angles.append((180 / np.pi) * np.arcsin(np.sin(a_angle)/np.cos(e_angle))) # Why
+#
+#                 output_a_angles.append((180 / np.pi) * np.arcsin(np.sin(a_angle) * np.cos(e_angle)))  # Why
+#
+#                 output_ranges.append(input_ranges[i])
 
     phi = np.array(output_e_angles)
-    theta = np.array(output_a_angles)
+    theta = np.array(output_a_angles) #  -180
+    # theta[theta<=-90] = np.abs(theta[theta<=-90])
+    # theta[theta<=90] = - (90 - theta[theta<=90])
+    # theta[theta>90] = theta[theta>90] - 90
     ranges = np.array(output_ranges)
 
+    # x = (np.cos(np.pi / 180 * theta) * ranges * range_resolution)     # x = np.sin(azi) * range
+    # y = np.abs(np.sin(np.pi / 180 * theta) * ranges * range_resolution)     # y = np.cos(azi) * range
+    # for both naive and capon:
+    x = (np.cos(np.pi / 180 * theta))
+    y = np.abs(np.sin(np.pi / 180 * theta))
+    z = np.zeros(len(theta))
+
     # points could be calculated by trigonometry,
-    x = np.sin(np.pi / 180 * theta) * ranges * range_resolution     # x = np.sin(azi) * range
-    y = np.cos(np.pi / 180 * theta) * ranges * range_resolution     # y = np.cos(azi) * range
-    z = np.tan(np.pi / 180 * phi) * ranges * range_resolution       # z = np.tan(ele) * range
+    # x = -np.sin(np.pi / 180 * theta) * ranges[0] * range_resolution     # x = np.sin(azi) * range
+    # y = -np.cos(np.pi / 180 * theta) * ranges * range_resolution     # y = np.cos(azi) * range
+    # z = np.zeros(len(theta))
+    # z = np.tan(np.pi / 180 * phi) * ranges * range_resolution       # z = np.tan(ele) * range
 
     xyz_vec = np.array([x, y, z])
 
     # return phi, theta, ranges
-    return phi, theta, ranges, xyz_vec
+    return phi, theta, ranges, xyz_vec, output_ranges_idx

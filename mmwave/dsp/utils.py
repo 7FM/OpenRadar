@@ -11,6 +11,7 @@
 # ==============================================================================
 
 import numpy as np
+from numba import njit, jit
 try:
     from enum import Enum
 except ImportError:
@@ -35,6 +36,7 @@ PEAKVAL = 2
 
 MAX_OBJ_OUT = 100
 
+@jit(parallel=True)
 def windowing(input, window_type, axis=0):
     """Window the input based on given window type.
 
@@ -74,6 +76,10 @@ def XYestimation(azimuthMagSqr,
         numAngelBins: hardcoded as 64 in our project.
         detObj2D: Output yet to be populated with the calculated X, Y and Z information
     """
+    extendedMaxVelocityEnabled = False
+    numRangeBins = 256
+    numDopplerBins = 16
+    rangeResolution = 0.0408
     if extendedMaxVelocityEnabled and numVirtualAntAzim > numRxAntennas:
         azimuthMagSqrCopy = azimuthMagSqr
     else:
@@ -91,8 +97,8 @@ def XYestimation(azimuthMagSqr,
     detObj2D[:, PEAKVAL] = np.sqrt(maxVal / (numRangeBins*numAngleBins*numDopplerBins))
     
     rangeInMeter = detObj2D[:, RANGEIDX] * rangeResolution
-    rangeInMeter -= compRxChanCfg.rangeBias
-    rangeInMeter = np.maximum(rangeInMeter-compRxChanCfg.rangeBias, 0)
+    # rangeInMeter -= compRxChanCfg.rangeBias
+    # rangeInMeter = np.maximum(rangeInMeter-compRxChanCfg.rangeBias, 0)
     
     sMaxIdx = maxIdx
     sMaxIdx[maxIdx[:] > (numAngleBins/2-1)] -= numAngleBins

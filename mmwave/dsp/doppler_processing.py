@@ -11,6 +11,7 @@
 # ==============================================================================
 
 import numpy as np
+from numba import njit, jit
 from . import compensation
 from . import utils
 
@@ -20,8 +21,8 @@ def doppler_resolution(band_width, start_freq_const=77, ramp_end_time=62, idle_t
     """Calculate the doppler resolution for the given radar configuration.
 
     Args:
-        start_freq_const (int): Frequency chirp starting point.
-        ramp_end_time (int): Frequency chirp end point.
+        start_freq_const (float): Frequency chirp starting point.
+        ramp_end_time (float): Frequency chirp end point.
         idle_time_const (int): Idle time between chirps.
         band_width (float): Radar config bandwidth.
         num_loops_per_frame (int): The number of loops in each frame.
@@ -41,7 +42,6 @@ def doppler_resolution(band_width, start_freq_const=77, ramp_end_time=62, idle_t
 
     return doppler_resolution
 
-
 def separate_tx(signal, num_tx, vx_axis=1, axis=0):
     """Separate interleaved radar data from separate TX along a certain axis to account for TDM radars.
 
@@ -59,7 +59,11 @@ def separate_tx(signal, num_tx, vx_axis=1, axis=0):
     reordering = np.arange(len(signal.shape))
     reordering[0] = axis
     reordering[axis] = 0
-    signal = signal.transpose(reordering)
+    if not (reordering == np.arange(len(reordering))).all():  # check if has to reorder
+        signal = signal.transpose(reordering)
+
+    # if signal.shape[1] != num_tx * signal.shape[1]:
+    #     pass
 
     out = np.concatenate([signal[i::num_tx, ...] for i in range(num_tx)], axis=vx_axis)
 
@@ -111,7 +115,8 @@ def doppler_processing(radar_cube,
         
     # (Optional) Static Clutter Removal
     if clutter_removal_enabled:
-        fft2d_in = compensation.clutter_removal(fft2d_in, axis=0)
+        # fft2d_in = compensation.clutter_removal(fft2d_in, axis=0)
+        fft2d_in[1:] = compensation.clutter_removal(fft2d_in[1:], axis=0)  # TODO this or above with static detection removal
 
     # transpose to (numRangeBins, numVirtualAntennas, num_doppler_bins)
     fft2d_in = np.transpose(fft2d_in, axes=(2, 1, 0))
@@ -133,7 +138,7 @@ def doppler_processing(radar_cube,
 
     # Accumulate
     if accumulate:
-        return np.sum(fft2d_log_abs, axis=1), aoa_input
+        return np.sum(fft2d_log_abs, axis=1), aoa_input  # TODO divide by num_rx?
     else:
         return fft2d_log_abs, aoa_input
 

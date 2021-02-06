@@ -497,7 +497,7 @@ class DCA1000:
     # from numba import jit
     # @staticmethod
     # @jit()
-    def organize(raw_frame, num_chirps, num_rx, num_samples, num_loops_per_frame, num_tx, stream=False):
+    def organize(raw_frame, num_chirps, num_rx, num_samples, num_loops_per_frame, num_tx):
         """Reorganizes raw ADC data into a full frame
 
         Args:
@@ -527,15 +527,6 @@ class DCA1000:
         """
         ret = np.zeros(len(raw_frame) // 2, dtype=complex)
         # TODO reshape depending on antenna parameter etc
-        # if stream:
-        #     # raw_frame = np.dstack((raw_frame[:92160//2], raw_frame[92160//2:])).flatten()
-        #     ret[0::4] = raw_frame[0::8] + 1j * raw_frame[4::8]
-        #     ret[1::4] = raw_frame[1::8] + 1j * raw_frame[5::8]
-        #     ret[2::4] = raw_frame[2::8] + 1j * raw_frame[6::8]
-        #     ret[3::4] = raw_frame[3::8] + 1j * raw_frame[7::8]
-        #     ret = ret.reshape((num_chirps, num_samples, num_rx))
-        #     ret = ret.transpose((0, 2, 1))
-        # else:
         # Separate IQ data
         ret[0::4] = raw_frame[0::8] + 1j * raw_frame[4::8]
         ret[1::4] = raw_frame[1::8] + 1j * raw_frame[5::8]

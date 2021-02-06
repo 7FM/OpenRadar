@@ -49,6 +49,12 @@ MAX_PACKET_SIZE = 1514
 BYTES_IN_PACKET = 1456
 # BYTES_IN_PACKET = 1462
 
+CMD_FPGA = '5AA50300060001010102031EAAEE'
+CMD_RECORD = '5AA50B000600BE05350C0000AAEE'
+CMD_START_RECORD = '5AA509000000AAEE'
+CMD_START_RECORD_2 = 'd'
+CMD_STOP_RECORD = ''
+
 
 class AdcDataStreamer():
     def __init__(self, data_recv_cfg, bytes_in_frame, timeout=1, udp_raw_data=False, udp_raw_data_dir=None,
@@ -77,14 +83,22 @@ class AdcDataStreamer():
         self.log_error_func = log_error_func
         self.log_warning_func = log_warning_func
         self.log_info_func = log_info_func
+        print("Bytes in Frame:", self.bytes_in_frame)
 
-    def is_set_up(self):
+    def is_set_up(self, timeout=1):
         try:
-            self.data_socket.settimeout(1)
+            self.data_socket.settimeout(timeout)
             packet_num, byte_count, packet_data = self._read_data_packet()
             return True
         except socket.timeout as e:
             return False
+
+    def retry_streaming(self):
+        self.log_warning_func("Retrying for new udp data...")
+        while not self.is_set_up(timeout=60):
+            self.log_warning_func("No data...")
+        packet_num, byte_count, packet_data = self._read_data_packet()
+        return packet_num, byte_count, packet_data
 
     def stream(self, data_queue, time_queue):
 
@@ -114,7 +128,7 @@ class AdcDataStreamer():
                     packet_num, byte_count, packet_data = self._read_data_packet()
                 except Exception as e:
                     self.log_error_func(e)
-                    # raise TimeoutError("Could not reveive from dca1000 using timeout (s):", self.timeout)  # TODO remove when timeout handled?
+                    packet_num, byte_count, packet_data = self.retry_streaming()
                 self.last_byte_count = byte_count
                 self.last_packet_num = packet_num
                 if (byte_count + BYTES_IN_PACKET) % self.bytes_in_frame < BYTES_IN_PACKET:  # got first bytes of new frame
@@ -132,7 +146,11 @@ class AdcDataStreamer():
 
             self.data_socket.settimeout(self.timeout)
 
-            packet_num, byte_count, packet_data = self._read_data_packet()
+            try:
+                packet_num, byte_count, packet_data = self._read_data_packet()
+            except Exception as e:
+                self.log_error_func(e)
+                packet_num, byte_count, packet_data = self.retry_streaming()
             # print(packet_num, byte_count, len(packet_data))
             # new_byte_count = byte_count - self.last_byte_count
             # new_byte_idx = new_byte_count // 2
@@ -177,6 +195,9 @@ class AdcDataStreamer():
             self.last_packet_num = packet_num
             self.last_frame_byte_idx= self.frame_byte_idx
 
+    def setup(self):
+        pass
+
     def _read_data_packet(self):
         """Helper function to read in a single ADC packet via UDP
 
@@ -186,12 +207,11 @@ class AdcDataStreamer():
         """
         data, addr = self.data_socket.recvfrom(MAX_PACKET_SIZE)  # TODO handle timeouts?
         packet_num = struct.unpack('<1l', data[:4])[0]
-        # print("packet_num", packet_num)
         byte_count = struct.unpack('>Q', b'\x00\x00' + data[4:10][::-1])[0]
         # packet_data = data[10:]
         packet_data = np.frombuffer(data[10:], dtype=np.uint8)
         if self.backup_file is not None:  # backup raw UDP traffic
-            self.backup_file.write(data)
+            self.backup_file.write(packet_data)
         # packet_data = np.frombuffer(data[10:], dtype=np.int16)
         return packet_num, byte_count, packet_data
 
@@ -232,7 +252,7 @@ class DCA1000:
         # self.data_port = data_port
         # self.config_port = config_port
 
-        adc_params = {'chirps': 16,  # 32 TODO chirps
+        adc_params = {'chirps': num_loops_per_frame,
                       'rx': num_rx,
                       'tx': num_tx,
                       'samples': num_adc_samples,
@@ -284,6 +304,9 @@ class DCA1000:
         self.producer = None
         self.data_queue = None
         self.time_queue = None
+
+    def setup(self):
+        self.adc_data_streamer.setup()
 
     def start_streaming(self, data_queue, time_queue=Queue(30)):
         self.data_queue = data_queue
@@ -385,7 +408,7 @@ class DCA1000:
             if packets_read > self.packets_in_frame_clipped:
                 packets_read = 0
 
-    def _send_command(self, cmd, length='0000', body='', timeout=1):
+    def _send_command(self, cmd, length='0000', body='', timeout=4):
         """Helper function to send a single commmand to the FPGA
 
         Args:
@@ -406,6 +429,32 @@ class DCA1000:
         msg = codecs.decode(''.join((CONFIG_HEADER, str(cmd), length, body, CONFIG_FOOTER)), 'hex')
         try:
             self.config_socket.sendto(msg, self.cfg_dest)
+            resp, addr = self.config_socket.recvfrom(MAX_PACKET_SIZE)
+        except socket.timeout as e:
+            print(e)
+        return resp
+    
+    def _send_custom_command(self, cmd, timeout=4):
+        """Helper function to send a single commmand to the FPGA
+
+        Args:
+            cmd (CMD): Command code to send to the FPGA
+            length (str): Length of the body of the command (if any)
+            body (str): Body information of the command
+            timeout (int): Time in seconds to wait for socket data until timeout
+
+        Returns:
+            str: Response message
+
+        """
+        # Create timeout exception
+        self.config_socket.settimeout(timeout)
+
+        # Create and send message
+        resp = ''
+        msg = codecs.decode(cmd, 'hex')
+        try:
+            print(self.config_socket.sendto(msg, self.cfg_dest))
             resp, addr = self.config_socket.recvfrom(MAX_PACKET_SIZE)
         except socket.timeout as e:
             print(e)
@@ -445,8 +494,10 @@ class DCA1000:
         """
         return self._send_command(CMD.RECORD_STOP_CMD_CODE)
 
-    @staticmethod
-    def organize(raw_frame, num_chirps, num_rx, num_samples, stream=False):
+    # from numba import jit
+    # @staticmethod
+    # @jit()
+    def organize(raw_frame, num_chirps, num_rx, num_samples, num_loops_per_frame, num_tx, stream=False):
         """Reorganizes raw ADC data into a full frame
 
         Args:
@@ -476,22 +527,25 @@ class DCA1000:
         """
         ret = np.zeros(len(raw_frame) // 2, dtype=complex)
         # TODO reshape depending on antenna parameter etc
-        if stream:
-            # raw_frame = np.dstack((raw_frame[:92160//2], raw_frame[92160//2:])).flatten()
-            ret[0::4] = raw_frame[0::8] + 1j * raw_frame[4::8]
-            ret[1::4] = raw_frame[1::8] + 1j * raw_frame[5::8]
-            ret[2::4] = raw_frame[2::8] + 1j * raw_frame[6::8]
-            ret[3::4] = raw_frame[3::8] + 1j * raw_frame[7::8]
-            ret = ret.reshape((num_chirps, num_samples, num_rx))
-            ret = ret.transpose((0, 2, 1))
-        else:
-            # Separate IQ data
-            ret[0::4] = raw_frame[0::8] + 1j * raw_frame[4::8]
-            ret[1::4] = raw_frame[1::8] + 1j * raw_frame[5::8]
-            ret[2::4] = raw_frame[2::8] + 1j * raw_frame[6::8]
-            ret[3::4] = raw_frame[3::8] + 1j * raw_frame[7::8]
-            # ret[0::2] = raw_frame[0::4] + 1j * raw_frame[2::4]
-            # ret[1::2] = raw_frame[1::4] + 1j * raw_frame[3::4]
-            ret = ret.reshape((num_chirps, num_samples, num_rx))
-            ret = ret.transpose((0, 2, 1))
+        # if stream:
+        #     # raw_frame = np.dstack((raw_frame[:92160//2], raw_frame[92160//2:])).flatten()
+        #     ret[0::4] = raw_frame[0::8] + 1j * raw_frame[4::8]
+        #     ret[1::4] = raw_frame[1::8] + 1j * raw_frame[5::8]
+        #     ret[2::4] = raw_frame[2::8] + 1j * raw_frame[6::8]
+        #     ret[3::4] = raw_frame[3::8] + 1j * raw_frame[7::8]
+        #     ret = ret.reshape((num_chirps, num_samples, num_rx))
+        #     ret = ret.transpose((0, 2, 1))
+        # else:
+        # Separate IQ data
+        ret[0::4] = raw_frame[0::8] + 1j * raw_frame[4::8]
+        ret[1::4] = raw_frame[1::8] + 1j * raw_frame[5::8]
+        ret[2::4] = raw_frame[2::8] + 1j * raw_frame[6::8]
+        ret[3::4] = raw_frame[3::8] + 1j * raw_frame[7::8]
+        # ret[0::2] = raw_frame[0::4] + 1j * raw_frame[2::4]
+        # ret[1::2] = raw_frame[1::4] + 1j * raw_frame[3::4]
+        ret = ret.reshape((num_chirps, num_samples, num_rx))
+        if num_chirps != num_tx * num_loops_per_frame:  # only use n-TX antennas
+            num_tx_data = num_chirps // num_loops_per_frame
+            ret = np.delete(ret, slice(num_tx_data-1, None, num_tx_data), 0)
+        ret = ret.transpose((0, 2, 1))
         return ret

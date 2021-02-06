@@ -83,32 +83,44 @@ def prune_to_peaks(det_obj2_d_raw,
         cfar_det_obj_index_pruned (np.ndarray): Pruned version of cfar_det_obj_index.
         cfar_det_obj_SNR_pruned (np.ndarray): Pruned version of cfar_det_obj_SNR.
     """
+    num_range_bins = det_matrix.shape[0]
 
     range_idx = det_obj2_d_raw['rangeIdx']
     doppler_idx = det_obj2_d_raw['dopplerIdx']
-    next_idx = doppler_idx + 1
-    next_idx[doppler_idx == num_doppler_bins - 1] = 0
-    prev_idx = doppler_idx - 1
-    prev_idx[doppler_idx == 0] = num_doppler_bins - 1
 
-    prev_val = det_matrix[range_idx, prev_idx]
+    next_idx_doppler = doppler_idx + 1
+    next_idx_doppler[doppler_idx == num_doppler_bins - 1] = 0
+    prev_idx_doppler = doppler_idx - 1
+    prev_idx_doppler[doppler_idx == 0] = num_doppler_bins - 1
+
+    # next_idx_range = range_idx + 1
+    # next_idx_range[range_idx == num_range_bins - 1] = 0
+    # prev_idx_range = range_idx - 1
+    # prev_idx_range[range_idx == 0] = num_range_bins - 1
+
+    prev_val_doppler = det_matrix[range_idx, prev_idx_doppler]
     current_val = det_matrix[range_idx, doppler_idx]
-    next_val = det_matrix[range_idx, next_idx]
+    next_val_doppler = det_matrix[range_idx, next_idx_doppler]
+
+    # prev_val_range = det_matrix[prev_idx_range, doppler_idx]
+    # # current_val_range = det_matrix[range_idx, doppler_idx]
+    # next_val_range = det_matrix[next_idx_range, doppler_idx]
 
     if reserve_neighbor:
-        next_next_idx = next_idx + 1
-        next_next_idx[next_idx == num_doppler_bins - 1] = 0
-        prev_prev_idx = prev_idx - 1
-        prev_prev_idx[prev_idx == 0] = num_doppler_bins - 1
+        next_next_idx = next_idx_doppler + 1
+        next_next_idx[next_idx_doppler == num_doppler_bins - 1] = 0
+        prev_prev_idx = prev_idx_doppler - 1
+        prev_prev_idx[prev_idx_doppler == 0] = num_doppler_bins - 1
 
         prev_prev_val = det_matrix[range_idx, prev_prev_idx]
         next_next_val = det_matrix[range_idx, next_next_idx]
-        is_neighbor_of_peak_next = (current_val > next_next_val) & (current_val > prev_val)
-        is_neighbor_of_peak_prev = (current_val > prev_prev_val) & (current_val > next_val)
+        is_neighbor_of_peak_next = (current_val > next_next_val) & (current_val > prev_val_doppler)
+        is_neighbor_of_peak_prev = (current_val > prev_prev_val) & (current_val > next_val_doppler)
 
-        pruned_idx = (current_val > prev_val) & (current_val > next_val) | is_neighbor_of_peak_next | is_neighbor_of_peak_prev
+        pruned_idx = (current_val > prev_val_doppler) & (current_val > next_val_doppler) | is_neighbor_of_peak_next | is_neighbor_of_peak_prev
     else:
-        pruned_idx = (current_val > prev_val) & (current_val > next_val)
+        pruned_idx = (current_val > prev_val_doppler) & (current_val > next_val_doppler)
+        # pruned_idx = (current_val > prev_val_range) & (current_val > next_val_range)
 
     det_obj2_d_pruned = det_obj2_d_raw[pruned_idx]
 

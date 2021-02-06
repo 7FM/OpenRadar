@@ -66,7 +66,10 @@ def ca(x, *argv, **kwargs):
     return ret
 
 
-def ca_(x, guard_len=4, noise_len=8, mode='wrap', l_bound=4000):
+ca_kernel = None
+
+
+def ca_(x, guard_len=4, noise_len=8, mode='wrap', l_bound=4000, new_kernel=False):
     """Uses Cell-Averaging CFAR (CA-CFAR) to calculate a threshold that can be used to calculate peaks in a signal.
 
     Args:
@@ -99,14 +102,16 @@ def ca_(x, guard_len=4, noise_len=8, mode='wrap', l_bound=4000):
             (array([44, 37, 41, 65, 81, 91, 67, 51, 34, 46]), array([24, 17, 21, 45, 61, 71, 47, 31, 14, 26]))
 
     """
+    global ca_kernel
     if isinstance(x, list):
         x = np.array(x)
     assert type(x) == np.ndarray
 
-    kernel = np.ones(1 + (2 * guard_len) + (2 * noise_len), dtype=x.dtype) / (2 * noise_len)
-    kernel[noise_len:noise_len + (2 * guard_len) + 1] = 0
+    if ca_kernel is None or new_kernel:
+        ca_kernel = np.ones(1 + (2 * guard_len) + (2 * noise_len), dtype=x.dtype) / (2 * noise_len)
+        ca_kernel[noise_len:noise_len + (2 * guard_len) + 1] = 0
 
-    noise_floor = convolve1d(x, kernel, mode=mode)
+    noise_floor = convolve1d(x, ca_kernel, mode=mode)
     threshold = noise_floor + l_bound
 
     return threshold, noise_floor

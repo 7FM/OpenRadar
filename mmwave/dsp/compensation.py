@@ -174,9 +174,10 @@ def near_field_correction(detected_objects, azimuth_ant_near, num_angle_bins, nu
     #    and corresponds to the actual spacing on the EVM, it is not
     #    tied to the actual start frequency set in profile config, hence does not
     #    need to be computed on the fly from that configuration.
-    # 3e8 / 77e9 = 0.0038961... in meters -> in millimeter: 3.8961 as above 
-    LAMBDA_77GHz_MILLIMETER = 3e8 / 77e9
-    # LAMBDA_77GHz_MILLIMETER = 3e8 / 79e9
+    # lambda = c / f = 3e8 m/s / 77e9 Hz = 0.0038961 m -> in millimeter: 3.8961 mm as above
+    # As all calculations here are meant to be calculated in millimeters, we have to scale lambda accordingly!
+    LAMBDA_77GHz_MILLIMETER = (3e8 / 77e9) * 1000.0
+    # LAMBDA_77GHz_MILLIMETER = (3e8 / 79e9) * 1000.0
     MMWDEMO_TWO_PI_OVER_LAMBDA = 2.0 * math.pi / LAMBDA_77GHz_MILLIMETER
 
     # Sanity check and check if nearFieldCorrection is necessary.
